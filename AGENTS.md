@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> **NakedClaw fork.** Read [.agents/skills/nakedclaw/SKILL.md](.agents/skills/nakedclaw/SKILL.md) first. It overrides the rules below wherever they conflict (main-thread database access, per-call checks, caps, auth and session bookkeeping).
+
 The task defines scope and authorization; its chosen workflow owns execution,
 review, publication, recovery, and cleanup. Explicit user instructions take
 precedence over skill guidelines and workflow defaults; host limits and required

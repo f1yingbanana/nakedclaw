@@ -364,7 +364,12 @@ export async function createSessionRowProjection(params: records.ProjectionOptio
       });
     }
     // Dirty keys retain failed background work for the next reader.
-    void ensureMaterialized().catch(() => {});
+    // NakedClaw: per-session changes (every transcript append and entry write)
+    // are materialized by the next reader, which always awaits
+    // ensureMaterialized(); only global changes refresh eagerly (nakedclaw skill, stage 4).
+    if ("all" in change) {
+      void ensureMaterialized().catch(() => {});
+    }
   }
   const { readSourceEntry, readChildLinks, readPreparedSpawnedBy } =
     rowRelations.createSessionRowRelationReads({
@@ -494,8 +499,8 @@ export async function createSessionRowProjection(params: records.ProjectionOptio
       revisions.invalidate();
       revisions.publishFacts(row);
       records.invalidateDatabaseFacts(row, retained);
+      // NakedClaw: the next reader materializes (nakedclaw skill, stage 4).
       dirty.add(id);
-      void ensureMaterialized().catch(() => {});
     },
   });
   const generations = createSessionRowGenerationObservations({

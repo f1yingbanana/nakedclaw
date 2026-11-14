@@ -89,10 +89,13 @@ it("publishes local placement receipts without rereading or adopting another sto
         return snapshot;
       });
       sessionChanges.emit(target);
+      // NakedClaw: per-session changes are materialized by the next reader (stage 4).
+      const materialized = projection.ensureMaterialized();
       await reading.promise;
       nowMs = 30;
       const next = await placements.claimTurn({ ...claimInput, claimId: "next-receipt-claim" });
       resumeRead.resolve();
+      await materialized;
       await describe(30);
       expect(reads).toHaveBeenCalledTimes(1);
       await placements.releaseTurn(next);

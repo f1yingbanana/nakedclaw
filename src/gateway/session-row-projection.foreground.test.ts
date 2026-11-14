@@ -254,6 +254,8 @@ it("retains transcript previews across metadata edits and refreshes them after a
         messages: [{ message: { role: "assistant", content: "Appended preview" } }],
         touchSessionEntry: false,
       });
+      // NakedClaw: transcript appends are materialized by the next reader (stage 4).
+      await projection.ensureMaterialized();
       await appended;
       expect(projection.snapshot(query, { includeLastMessage: true }).row?.lastMessagePreview).toBe(
         "Appended preview",

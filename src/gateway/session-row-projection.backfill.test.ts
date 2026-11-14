@@ -599,6 +599,8 @@ it("backfills terminal fallback models and clears previews when the newest messa
         messages: [{ message: { role: "assistant", content: "x".repeat(70 * 1024) } }],
         touchSessionEntry: false,
       });
+      // NakedClaw: transcript appends are materialized by the next reader (stage 4).
+      await projection.ensureMaterialized();
       await withinTest(appended, signal);
       expect(projection.snapshot(query, { includeLastMessage: true }).row).toMatchObject({
         activeModel: undefined,

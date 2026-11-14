@@ -119,10 +119,12 @@ happens.
   every agent keeps one open executor.
 - `MAX_STORES = 64` in the worker broker refuses stores beyond 64 ("SQLite
   worker queue capacity reached"). Removed.
-- Process-local LRUs sized for small installs (history workers, rows cache) are
-  sized for the whole cast.
-- Per-agent SQLite page cache is lowered so ~150 open databases stay within a
-  sane memory budget.
+- A full worker queue waits instead of failing after 10 s; that refusal used to
+  become a boot-long "inspection-failed" refusal of the agent.
+- Worker task pools accept 4,096 pending tasks instead of 128, so a full
+  cast's startup burst is not refused.
+- Per-agent SQLite page cache stays at SQLite's default unless the A/B shows
+  memory pressure from ~150 open databases.
 
 What we lose: memory headroom on huge installs (thousands of agents), which
 Kazusa does not have. File descriptors are not a concern: Node raises its soft
@@ -140,12 +142,16 @@ stays: it drives backoff.
 
 ### Stage 4: session and transcript side-work (≈11%)
 
-- Session list row projection is no longer rebuilt eagerly on every transcript
-  or entry event; it is built when someone reads the list.
-- The session observer captures per-event state lazily, only when subscribed.
-- Other per-append extras (FTS indexing, receipts, audit ledger) are cut or
-  deferred where Kazusa never reads them. Each is decided in its own commit,
-  with the reader search recorded.
+- Session list row projection is no longer rebuilt eagerly on every
+  per-session transcript or entry event; the next reader materializes it (every
+  reader already awaits `ensureMaterialized()`). Global changes still refresh
+  eagerly. Gateway WebSocket clients (Control UI) may get live lifecycle events
+  without row enrichment until they read; Kazusa does not use them.
+- Measured and left alone: the transcript-update broadcaster (<0.2%, already
+  cheap without subscribers) and the session observer's per-event read capture
+  (0.7%; its captured identity is part of a stale-read fence).
+- FTS indexing, receipts and the audit ledger were not hot enough in the
+  profiles to cut blind; revisit with the post-strip profile.
 
 ### Stage 5: worker handoff for small operations (≈15%)
 
@@ -210,4 +216,19 @@ keyed-store v2 API with multi-store transactions in 2026.11.x.
 
 ## Strip log
 
-(Filled in per commit: stage, cut, assumption, measured effect.)
+Base: `v2026.10.5` (1b58cb9a1b4). Stock attribution is from four burst-minute
+profiles (`kazusa/.perf/demo/runs/r4/a`, `r5/b`).
+
+| Commit                                                                | Stage | Cut                                                                                                                                                                                                                                                      | Assumption | Stock share it targets                                                                                                                     |
+| --------------------------------------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `perf(naked): trust verified state ownership and memoize state paths` | 1     | owner lock + projection read once, heartbeat loss wired to `loseOwner`; owner path, canonical DB path, agent-dir and session-candidate identities memoized (`memoizeStatePathResolver`); one `stat` per identity; no duplicate access check in `grant()` | 2, 3       | `assertStateDatabaseAccessAllowed` 8.2%, `resolveDatabasePathKey` 6.0%, read candidates 1.6%, admission grant re-check ~2.6% (overlapping) |
+| `perf(naked): remove executor, store and queue caps`                  | 2     | no `MAX_IDLE_EXECUTORS`, no `MAX_STORES`, queue waits instead of 10 s refusal, pending tasks 128 → 4096                                                                                                                                                  | 1          | ~120 lease close/reopen cycles/min; boot-long agent refusals                                                                               |
+| `perf(naked): skip auth success bookkeeping for clean profiles`       | 3     | success writes only when failure state exists                                                                                                                                                                                                            | 5          | ~3,800 auth writer ops/min, `publishInlineAuthFailure` 3.3%                                                                                |
+| `perf(naked): materialize session rows on read`                       | 4     | no eager row refresh for per-session changes                                                                                                                                                                                                             | 1, 6       | row refresh ~1.7%                                                                                                                          |
+
+Stage 5 (worker ceremony) is deferred: after Stage 1 its remaining measured
+pieces are each ≤0.5% (env merge 0.5%, state context 0.3-0.6%, per-op admission
+channel 0.4%). The post-strip profile decides whether in-process execution of
+small operations is worth its risk.
+
+Measured effect: see the next entry (pair `n1`, `kazusa/.perf/naked/runs/`).

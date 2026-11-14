@@ -45,6 +45,7 @@ import {
 } from "./store.js";
 import type { AuthProfileCredential, AuthProfileStore } from "./types.js";
 import { runAuthProfileUsage } from "./usage-lifecycle.js";
+import { hasAuthProfileFailureState } from "./usage-state.js";
 import { withAuthProfileUsage } from "./usage-write.js";
 export {
   dedupeProfileIds,
@@ -639,6 +640,16 @@ export async function markAuthProfileSuccess(params: {
     !profile ||
     profile.setup?.replacement ||
     resolveProviderIdForAuth(profile.provider) !== providerKey
+  ) {
+    return;
+  }
+  // NakedClaw: a clean profile's success only refreshes ordering metadata, and
+  // upstream paid one auth write plus an O(agents) snapshot publication for it on
+  // every model call (nakedclaw skill, stage 3). A failure recorded after this
+  // run loaded its store is cleared by the next run's success.
+  if (
+    !isUserModelAuthProfileId(profileId) &&
+    !hasAuthProfileFailureState(store.usageStats?.[profileId])
   ) {
     return;
   }

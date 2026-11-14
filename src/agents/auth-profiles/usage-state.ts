@@ -32,6 +32,22 @@ const clearedWindows = Object.fromEntries(
   [...blockedFields, ...cooldownFields, ...disabledFields].map((field) => [field, undefined]),
 );
 
+/**
+ * NakedClaw: whether a success would change anything besides ordering metadata
+ * (lastUsed, lastProbeAt, lastGood), which choose nothing with one credential
+ * per provider (nakedclaw skill, assumption 5).
+ */
+export function hasAuthProfileFailureState(stats: ProfileUsageStats | undefined): boolean {
+  if (!stats) {
+    return false;
+  }
+  return (
+    Boolean(stats.errorCount) ||
+    stats.failureCounts !== undefined ||
+    expiryWindows.some((fields) => fields.some((field) => stats[field] !== undefined))
+  );
+}
+
 /** Clears failure windows while preserving unrelated usage history. */
 export function resetAuthProfileFailureState(
   existing: ProfileUsageStats,

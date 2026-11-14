@@ -1,5 +1,5 @@
 /** Process-local reverse registry from prepared agent directories to agent ids. */
-import { resolveIdentityPathViaExistingAncestorSync } from "../infra/boundary-path.js";
+import { resolveStatePathIdentitySync } from "../infra/boundary-path.js";
 import { isPathInside } from "../infra/path-guards.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
@@ -12,7 +12,8 @@ export function normalizeAgentDirRegistryPath(
   agentDir: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return resolveIdentityPathViaExistingAncestorSync(resolveUserPath(agentDir, env));
+  // NakedClaw: agent directories are state paths (nakedclaw skill, assumption 3).
+  return resolveStatePathIdentitySync(resolveUserPath(agentDir, env));
 }
 
 /** Register a resolved agent directory for later reverse lookup. */

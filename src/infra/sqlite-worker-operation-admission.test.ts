@@ -35,16 +35,14 @@ it.each([
   "revoke",
   "close",
   "late-close",
-  "access-close",
   "self-fence",
   "request-revoke",
-  "late-revoke",
+  // NakedClaw: "access-close" and "late-revoke" revoked access inside admit()
+  // between the receive check and the grant; that duplicate check is gone.
 ] as const)("waits for the live owner's %s decision when host scheduling is delayed", (outcome) => {
   const revoked = new Error("Synthetic owner authority revoked");
   const observed: SqliteWorkerAdmissionRequest[] = [];
   let requestCurrent = outcome !== "request-revoke";
-  let databaseCurrent = true;
-  let inGrant = false;
   const beforeRelease = vi.fn();
   const admission = createSqliteWorkerOperationAdmission((_request, grant) => {
     if (outcome === "revoke") {
@@ -53,13 +51,9 @@ it.each([
     if (outcome === "self-fence") {
       requestCurrent = false;
     }
-    if (outcome === "late-revoke") {
-      databaseCurrent = false;
-    }
     if (outcome === "late-close") {
       admission.finish();
     }
-    inGrant = true;
     grant(beforeRelease);
   });
   admission.observeRequests((request) => {
@@ -72,14 +66,7 @@ it.each([
         throw revoked;
       }
     },
-    assertAccess() {
-      if (outcome === "access-close" && inGrant) {
-        admission.finish();
-      }
-      if (!databaseCurrent) {
-        throw revoked;
-      }
-    },
+    assertAccess() {},
     acquireSchema() {
       throw new Error("Ordinary admission must not acquire schema authority");
     },

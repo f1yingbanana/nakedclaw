@@ -118,24 +118,8 @@ test("keeps sibling-family custody scoped to the captured directory", () => {
   ).toBe(true);
 });
 
-test("rejects a sibling-family candidate whose directory target changed", () => {
-  const familyPath = "/tmp/custom/openclaw-agent.sqlite";
-  vi.spyOn(fs.realpathSync, "native").mockImplementation((pathname) => {
-    const value = String(pathname);
-    if (value === "/tmp/custom") {
-      return "/tmp/replacement";
-    }
-    return value;
-  });
-
-  expect(
-    isSessionStoreReadCandidateCurrent({
-      path: familyPath,
-      physicalPath: familyPath,
-      scope: "sibling-family",
-    }),
-  ).toBe(false);
-});
+// NakedClaw: directory retarget detection for state paths was removed (nakedclaw
+// skill, assumption 3); see also the absent-sibling alias case below.
 
 test("rejects a candidate whose lexical target changed", () => {
   const capturedAlias = "/tmp/RUNNER~1/openclaw-agent.sqlite";
@@ -191,27 +175,6 @@ test("does not certify sibling absence when the initial directory listing failed
     "absence was not captured",
   );
 });
-
-test.runIf(process.platform !== "win32")(
-  "rejects an absent sibling after its directory alias is retargeted",
-  async () => {
-    const root = tempDirs.make("session-store-absent-alias-");
-    const original = path.join(root, "original");
-    const replacement = path.join(root, "replacement");
-    const alias = path.join(root, "alias");
-    fs.mkdirSync(original);
-    fs.mkdirSync(replacement);
-    fs.symlinkSync(original, alias, "junction");
-    const captured = captureSessionStoreWriteCandidates(path.join(alias, "custom.json"));
-    await Promise.resolve();
-    fs.unlinkSync(alias);
-    fs.symlinkSync(replacement, alias, "junction");
-    expect(() => captured.resolveIdentity(path.join(alias, "custom.main.sqlite"))).toThrow(
-      "selector changed during discovery",
-    );
-    expect(fs.readdirSync(replacement)).toEqual([]);
-  },
-);
 
 test.each(process.platform === "win32" ? ["file"] : ["file", "symlink"])(
   "never converts a removed positive %s into creation authority",

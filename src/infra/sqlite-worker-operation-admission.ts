@@ -12,7 +12,7 @@ import {
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
-import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
+import { resolveStatePathIdentitySync } from "./boundary-path.js";
 import { stageSqliteTransactionState } from "./sqlite-post-commit.js";
 import { currentSqliteOperationTiming } from "./sqlite-reader-lifecycle.js";
 import {
@@ -305,16 +305,22 @@ export function createSqliteWorkerOperationAdmission(
       );
       return;
     }
+    // NakedClaw: access asserted while receiving this request is not asserted
+    // again by a grant inside the same synchronous admission (nakedclaw skill,
+    // assumption 1); a grant issued later still re-checks.
+    let accessAssertedInReceive = false;
     const grant = (beforeRelease?: () => void) => {
       if (closed || expired() || Atomics.load(decision, 0) !== REQUESTED) {
         return false;
       }
       // Domain admission can reenter owner lifecycle before handing the native writer its grant.
-      try {
-        inOwnerContext(() => databaseAuthority?.assertAccess());
-      } catch (error) {
-        refuse(decision, error, "authority");
-        return false;
+      if (!accessAssertedInReceive) {
+        try {
+          inOwnerContext(() => databaseAuthority?.assertAccess());
+        } catch (error) {
+          refuse(decision, error, "authority");
+          return false;
+        }
       }
       if (closed || expired() || Atomics.load(decision, 0) !== REQUESTED) {
         return false;
@@ -335,6 +341,7 @@ export function createSqliteWorkerOperationAdmission(
         databaseAuthority?.assertRequest?.();
         databaseAuthority?.assertAccess();
       });
+      accessAssertedInReceive = true;
       if (
         request.stage === "prepare" &&
         isRecord(request.facts) &&
@@ -344,8 +351,7 @@ export function createSqliteWorkerOperationAdmission(
         if (
           !authority ||
           typeof request.facts.databasePath !== "string" ||
-          resolveIdentityPathViaExistingAncestorSync(request.facts.databasePath) !==
-            authority.databasePath
+          resolveStatePathIdentitySync(request.facts.databasePath) !== authority.databasePath
         ) {
           throw new SqliteWorkerError(
             "SQLite schema maintenance target differs from its admitted database",
@@ -365,6 +371,7 @@ export function createSqliteWorkerOperationAdmission(
       refuse(decision, error, source);
       return;
     } finally {
+      accessAssertedInReceive = false;
       // Repeated preparation requests must not retain every settled decision.
       decisions.delete(decision);
     }
@@ -407,7 +414,7 @@ export function createSqliteWorkerOperationAdmission(
       }
       databaseAuthority = {
         ...authority,
-        databasePath: resolveIdentityPathViaExistingAncestorSync(authority.databasePath),
+        databasePath: resolveStatePathIdentitySync(authority.databasePath),
       };
     },
     get failure() {

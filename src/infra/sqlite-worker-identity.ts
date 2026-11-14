@@ -1,6 +1,7 @@
 import { realpathSync, statSync, type BigIntStats } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { memoizeStatePathResolver } from "./boundary-path.js";
 import { hasErrnoCode } from "./errno.js";
 import { normalizeWindowsPathPreservingCase } from "./path-guards.js";
 
@@ -102,9 +103,13 @@ function missingAncestorParent(ancestor: string, missing: string[], error: unkno
   return parent;
 }
 
-/** In-process owner key only; never rewrite a configured or persisted database locator. */
-export function resolveDatabasePathKey(databasePath: string): string {
-  let ancestor = path.resolve(databasePath);
+/**
+ * In-process owner key only; never rewrite a configured or persisted database locator.
+ * NakedClaw: the canonical path is resolved once per path (nakedclaw skill,
+ * assumption 3); file identity (dev/ino/birthtime) is still read from the file.
+ */
+export const resolveDatabasePathKey = memoizeStatePathResolver((databasePath) => {
+  let ancestor = databasePath;
   const missing: string[] = [];
   while (true) {
     try {
@@ -113,7 +118,7 @@ export function resolveDatabasePathKey(databasePath: string): string {
       ancestor = missingAncestorParent(ancestor, missing, error);
     }
   }
-}
+});
 
 /** Inspect a native-owner path without replacing its diagnostic for a non-file target. */
 export function inspectDatabasePathIdentitySync(
@@ -133,7 +138,12 @@ export function inspectDatabasePathIdentitySync(
       return undefined;
     }
     const canonicalPath = resolveDatabasePathKey(resolvedPath);
-    return existingIdentity(file, statSync(canonicalPath, { bigint: true }), canonicalPath);
+    // The same pathname needs no second stat.
+    return existingIdentity(
+      file,
+      canonicalPath === resolvedPath ? file : statSync(canonicalPath, { bigint: true }),
+      canonicalPath,
+    );
   }
   const canonicalPath = resolveDatabasePathKey(resolvedPath);
   return { key: `path:${canonicalPath}`, canonicalPath };

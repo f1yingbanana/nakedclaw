@@ -41,6 +41,33 @@ export function resolveIdentityPathViaExistingAncestorSync(targetPath: string): 
   }
 }
 
+/**
+ * NakedClaw: state databases, their lock directories and agent directories
+ * never move, and no symlink under them changes, while the Gateway runs
+ * (nakedclaw skill, assumption 3). Memoizes a state-path resolver per absolute
+ * lexical path. Never use it for agent file-tool or sandbox boundaries: those
+ * must keep observing symlink changes.
+ */
+export function memoizeStatePathResolver(
+  resolve: (absolutePath: string) => string,
+): ((targetPath: string) => string) & { clear(): void } {
+  const resolved = new Map<string, string>();
+  const lookup = (targetPath: string) => {
+    const key = path.resolve(targetPath);
+    let value = resolved.get(key);
+    if (value === undefined) {
+      value = resolve(key);
+      resolved.set(key, value);
+    }
+    return value;
+  };
+  return Object.assign(lookup, { clear: () => resolved.clear() });
+}
+
+export const resolveStatePathIdentitySync = memoizeStatePathResolver(
+  resolveIdentityPathViaExistingAncestorSync,
+);
+
 // Boundary path resolution keeps alias expansion and realpath checks in one
 // shared contract before file IO happens.
 export { resolveRootPath, resolveRootPathSync } from "@openclaw/fs-safe/advanced";

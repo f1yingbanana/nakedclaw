@@ -1,13 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { extractErrorCode } from "@openclaw/normalization-core/error-coercion";
-import {
-  resolveGatewayLockDir,
-  resolveGatewayLockDirForCanonicalStateDir,
-} from "../config/paths.js";
+import { resolveGatewayLockDir } from "../config/paths.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { isPidAlive } from "../shared/pid-alive.js";
@@ -17,8 +13,7 @@ import {
 } from "../state/openclaw-state-db-async-lifecycle.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "../state/openclaw-state-db-contract.js";
 import { resolveOpenClawStateDirForDatabasePath } from "../state/openclaw-state-db.paths.js";
-import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
-import { sha256HexPrefixCore } from "./crypto-digest.js";
+import { resolveStatePathIdentitySync } from "./boundary-path.js";
 import { acquireFileLockSync } from "./file-lock-manager.js";
 import {
   describeGatewayLockHolder,
@@ -31,6 +26,7 @@ import {
   type StateOwnerDirectoryIdentity,
 } from "./gateway-state-owner-directory.js";
 import { startGatewayStateOwnerHeartbeat } from "./gateway-state-owner-heartbeat.js";
+import { resolveGatewayStateOwnerPath } from "./gateway-state-owner-path.js";
 import {
   assertPersistedStateDatabaseAccessAllowed,
   defaultPayload,
@@ -62,11 +58,13 @@ export function createGatewayStateProjection(
 ): GatewayStateProjection {
   let references = 1;
   let verifiedAt: number | undefined;
+  let physicallyVerified = false; // NakedClaw: read once, then trusted (skill assumption 2).
   const verify = () => {
-    verifiedAt = undefined;
-    if (!lock.verifyStillHeld()) {
+    if (!physicallyVerified && !lock.verifyStillHeld()) {
+      verifiedAt = undefined;
       return false;
     }
+    physicallyVerified = true;
     verifiedAt = performance.now();
     return true;
   };
@@ -128,6 +126,8 @@ function hasPhysicalOwnership(owner: ProcessOwner): boolean {
   }
 }
 
+// NakedClaw: a verified lock stays trusted (skill assumption 2); the heartbeat reports loss.
+const physicallyVerifiedLocks = new WeakSet<StateOwnerFile>();
 function verifyOwnerLock(owner: ProcessOwner, lock: StateOwnerFile | undefined): boolean {
   owner.verifiedAt = undefined;
   owner.lost.signal.throwIfAborted();
@@ -136,7 +136,7 @@ function verifyOwnerLock(owner: ProcessOwner, lock: StateOwnerFile | undefined):
   if (!lock) {
     return false;
   }
-  if (!lock.verifyStillHeld()) {
+  if (!physicallyVerifiedLocks.has(lock) && !lock.verifyStillHeld()) {
     loseOwner(
       owner,
       new Error(`${lock.lockPath}: no longer current; lock removed/replaced; restart the Gateway.`),
@@ -152,6 +152,7 @@ function verifyOwnerLock(owner: ProcessOwner, lock: StateOwnerFile | undefined):
     owner.heartbeat.worker.postMessage([projection.lockPath, raw], []);
     owner.heartbeat.paths.add(projection.lockPath);
   }
+  physicallyVerifiedLocks.add(lock);
   owner.verifiedAt = performance.now();
   return true;
 }
@@ -231,7 +232,7 @@ export function withStateDatabaseColdAdmission<T>(
 ): T {
   const budget = normalizeSqliteNonNegativeInteger(params.busyTimeoutMs, "busyTimeoutMs");
   const deadline = performance.now() + budget;
-  const canonical = resolveIdentityPathViaExistingAncestorSync(params.databasePath);
+  const canonical = resolveStatePathIdentitySync(params.databasePath);
   const remainingBusyTimeoutMs = () => Math.max(0, Math.ceil(deadline - performance.now()));
   const waiting = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
   for (;;) {
@@ -241,7 +242,7 @@ export function withStateDatabaseColdAdmission<T>(
     } catch (error) {
       if (
         !(error instanceof StateDatabaseAdmissionPendingError) ||
-        resolveIdentityPathViaExistingAncestorSync(error.databasePath) !== canonical ||
+        resolveStatePathIdentitySync(error.databasePath) !== canonical ||
         params.canRetry?.() === false
       ) {
         throw error;
@@ -255,29 +256,7 @@ export function withStateDatabaseColdAdmission<T>(
   }
 }
 
-/** State cleanup preserves this owner until destructive work and native handles settle. */
-export function resolveGatewayStateOwnerPath(databasePath: string): string {
-  const canonical = resolveIdentityPathViaExistingAncestorSync(databasePath);
-  const uid = process.getuid?.();
-  // The state directory is an ancestor of the freshly canonical database path.
-  const directory =
-    process.platform === "win32"
-      ? path.join(
-          os.homedir(),
-          "AppData",
-          "Local",
-          "OpenClaw",
-          "locks",
-          uid === undefined ? "openclaw-state-owners" : `openclaw-state-owners-${uid}`,
-        )
-      : resolveGatewayLockDirForCanonicalStateDir(
-          resolveOpenClawStateDirForDatabasePath(canonical),
-        );
-  return path.join(
-    resolveIdentityPathViaExistingAncestorSync(directory),
-    `state.${sha256HexPrefixCore(canonical, 16)}.lock`,
-  );
-}
+export { resolveGatewayStateOwnerPath } from "./gateway-state-owner-path.js";
 
 function acquireOwnerFile(
   databasePath: string,
@@ -521,9 +500,7 @@ export function acquireStateDatabaseSchemaLease(
     owner?.projectionPath ??
     path.join(
       resolveGatewayLockDir(
-        resolveOpenClawStateDirForDatabasePath(
-          resolveIdentityPathViaExistingAncestorSync(databasePath),
-        ),
+        resolveOpenClawStateDirForDatabasePath(resolveStatePathIdentitySync(databasePath)),
       ),
       "gateway.state.lock",
     );

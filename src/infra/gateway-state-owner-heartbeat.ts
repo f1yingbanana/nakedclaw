@@ -52,8 +52,19 @@ export function startGatewayStateOwnerHeartbeat(
       execArgv: resolveRuntimeWorkerThreadExecArgv(url),
     });
     worker.unref();
-    // Parent expiration checks verify physical custody directly.
-    port1.on("message", () => undefined);
+    // NakedClaw: callers no longer re-read the lock on every access (nakedclaw
+    // skill, assumption 2), so the worker's report of a removed or replaced
+    // root lock is the loss signal. Transient renewal failures stay advisory;
+    // inspect() below still renews synchronously once the deadline passes.
+    port1.on("message", (message: unknown) => {
+      if (typeof message === "string" && message.endsWith("owner lock was removed or replaced")) {
+        onLost(
+          new Error(
+            `Gateway state ownership is no longer current: ${message}; restart the Gateway.`,
+          ),
+        );
+      }
+    });
     port1.unref();
     worker.on("error", (err) => onLost(new Error(`${coerceErrorMessage(err)}; restart Gateway.`)));
     const inspect = () => {

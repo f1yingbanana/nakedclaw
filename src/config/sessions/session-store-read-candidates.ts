@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { resolveIdentityPathViaExistingAncestorSync } from "../../infra/boundary-path.js";
+// NakedClaw: session databases are state paths; they never move while the
+// Gateway runs (nakedclaw skill, assumption 3), so identities are memoized.
+import { resolveStatePathIdentitySync } from "../../infra/boundary-path.js";
 import {
   inspectDatabasePathIdentitySync,
   readDatabasePathIdentitySync,
@@ -71,10 +73,10 @@ export function captureSessionStoreReadCandidate(
   const capturedPath = path.resolve(pathname);
   const physicalPath = scope
     ? path.join(
-        resolveIdentityPathViaExistingAncestorSync(path.dirname(capturedPath)),
+        resolveStatePathIdentitySync(path.dirname(capturedPath)),
         path.basename(capturedPath),
       )
-    : resolveIdentityPathViaExistingAncestorSync(capturedPath);
+    : resolveStatePathIdentitySync(capturedPath);
   return { path: capturedPath, physicalPath, ...(scope ? { scope } : {}) };
 }
 
@@ -106,7 +108,7 @@ function resolveCapturedSessionStoreReadCandidatePhysicalPath(
   if (candidate.scope || !isSymlinkFreeWindowsShortPath(candidate.physicalPath)) {
     return candidate.physicalPath;
   }
-  return resolveIdentityPathViaExistingAncestorSync(candidate.physicalPath);
+  return resolveStatePathIdentitySync(candidate.physicalPath);
 }
 
 function isSymlinkFreeWindowsShortPath(pathname: string): boolean {
@@ -163,7 +165,7 @@ export function assertSessionStoreReadCandidate(
   pathname: string,
   candidates: readonly SessionStoreReadCandidate[],
 ): string {
-  const physicalPath = resolveIdentityPathViaExistingAncestorSync(pathname);
+  const physicalPath = resolveStatePathIdentitySync(pathname);
   for (const candidate of candidates) {
     const matchesCapturedPhysicalPath =
       !candidate.scope &&

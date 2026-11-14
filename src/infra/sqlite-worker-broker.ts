@@ -63,7 +63,6 @@ import { sqliteWorkerRequestBytes } from "./sqlite-worker-state-context.js";
 import { resolveSqliteBrokerWorkerCount } from "./worker-pool-sizing.js";
 import { trackWorkerRequest, type WorkerRequestObservation } from "./worker-request-diagnostics.js";
 
-const MAX_STORES = 64;
 const MAX_QUEUED_COMMAND_BYTES = 64 * 1024 * 1024;
 export const SQLITE_WORKER_MAX_REQUESTS_PER_WORKER = 128;
 const SQLITE_WORKER_MAX_QUEUED_BYTES = 256 * 1024 * 1024;
@@ -143,11 +142,8 @@ export class SqliteWorkerBroker {
     if (this.draining) {
       return Promise.reject(new SqliteWorkerError("SQLite worker host is closing", "closed"));
     }
-    if (this.clients.size >= MAX_STORES) {
-      return Promise.reject(
-        new SqliteWorkerError("SQLite worker store capacity reached", "overloaded"),
-      );
-    }
+    // NakedClaw: no store-count cap; one Gateway opens every character's
+    // database (nakedclaw skill, stage 2).
     const client = {};
     this.clients.add(client);
     let snapshot: PreparedSqliteWorkerOpen;
@@ -242,7 +238,7 @@ export class SqliteWorkerBroker {
       const slot = await this.lifecycle.acquireSlot(
         options,
         moduleUrl,
-        { maxWorkers: this.maxWorkers, maxStores: MAX_STORES },
+        { maxWorkers: this.maxWorkers, maxStores: Number.POSITIVE_INFINITY },
         (replySlot) => this.createReplyOwner(replySlot),
       );
       try {
@@ -590,11 +586,7 @@ export class SqliteWorkerBroker {
         clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
         releaseInput();
-        let failure = error;
-        if (failure === undefined && Date.now() - started >= ADMISSION_TIMEOUT_MS) {
-          this.warnAdmission(this.waiters.get(slot)?.size ?? 0, Date.now() - started);
-          failure = new SqliteWorkerError("SQLite worker queue capacity reached", "overloaded");
-        }
+        const failure = error;
         if (failure !== undefined) {
           observation.completed();
           reject(toErrorObject(failure, "SQLite worker admission failed"));
@@ -603,10 +595,13 @@ export class SqliteWorkerBroker {
         }
       };
       const abort = () => resume(signal?.reason ?? new Error("SQLite worker operation canceled"));
+      // NakedClaw: a full worker queue delays work instead of failing it after
+      // 10 s; failed background preparation used to refuse an agent for the
+      // whole boot (nakedclaw skill, stage 2). Slow admission is still logged.
       const timer = setTimeout(() => {
         this.warnAdmission(this.waiters.get(slot)?.size ?? 0, Date.now() - started);
-        resume(new SqliteWorkerError("SQLite worker queue capacity reached", "overloaded"));
       }, ADMISSION_TIMEOUT_MS);
+      timer.unref();
       const releaseInput = this.inputAdmission.retain(bytes);
       waiters.add(resume);
       this.waiters.set(slot, waiters);

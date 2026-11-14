@@ -187,14 +187,8 @@ it.for([
     accepted: 160,
     maxPendingBytes: 128 * 1024,
   },
-  {
-    copies: 1,
-    name: "refuses only new descriptions at retained-batch capacity and admits them after drain",
-    count: 130,
-    idLength: 12 * 1024,
-    accepted: 128,
-    maxPendingBytes: undefined,
-  },
+  // NakedClaw: the 128-task pending cap is 4096 (nakedclaw skill, stage 2), so
+  // the 130-description refusal case no longer applies.
 ])("$name", async ({ count, idLength, accepted, maxPendingBytes, copies }, { signal }) => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     const fixture = await heldPlacementReads(count, {

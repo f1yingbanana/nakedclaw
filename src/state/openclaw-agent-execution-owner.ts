@@ -61,7 +61,6 @@ export type AgentDatabaseExecutionState = {
 };
 
 const log = createSubsystemLogger("state/agent-db");
-const MAX_IDLE_EXECUTORS = 4;
 const runInExecutionOwnerContext = AsyncLocalStorage.snapshot();
 
 export function createAgentDatabaseExecution(
@@ -519,23 +518,13 @@ export function createAgentDatabaseExecution(
             const drainSignal = getGatewayRestartDrainSignal();
             const canRetain = () =>
               retainIdle && generation && !nativeClosing && !drainSignal.aborted;
-            try {
-              for (const idle of executionState.idle) {
-                if (!canRetain() || executionState.idle.size < MAX_IDLE_EXECUTORS) {
-                  break;
-                }
-                if (borrowers !== 0 || retired || executionState.idle.has(owner)) {
-                  return;
-                }
-                await idle.closeIdle();
-              }
-            } catch (error) {
-              reportCleanupFailure(error);
-            }
-            if (borrowers !== 0 || retired || executionState.idle.has(owner)) {
+            if (executionState.idle.has(owner)) {
               return;
             }
-            if (canRetain() && executionState.idle.size < MAX_IDLE_EXECUTORS) {
+            // NakedClaw: every agent keeps its executor until the idle TTL or a
+            // restart drain. Upstream kept four and closed the rest, so a full
+            // cast reopened its databases ~120 times a minute (nakedclaw skill, stage 2).
+            if (canRetain()) {
               executionState.idle.add(owner);
               const timer = runInExecutionOwnerContext(() =>
                 setTimeout(() => {

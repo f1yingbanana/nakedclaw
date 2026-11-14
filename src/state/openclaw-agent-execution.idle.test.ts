@@ -9,7 +9,6 @@ import {
 } from "../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "../infra/sqlite-handle-lifecycle.js";
-import { readDatabasePathIdentitySync } from "../infra/sqlite-worker-identity.js";
 import {
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
@@ -88,45 +87,15 @@ it("opens only two executors for six alternating agent borrows", async () => {
   expect(closedAgents()).toEqual([]);
 });
 
-it("evicts the least recently used idle executor when a fifth agent finishes", async () => {
-  for (const agentId of ["first", "second", "third", "fourth", "first", "fifth"]) {
+// NakedClaw: no idle-executor cap; every agent keeps its executor warm until
+// its TTL, shutdown or a restart drain (nakedclaw skill, stage 2).
+it("keeps every agent's executor warm instead of evicting beyond four", async () => {
+  const agents = ["first", "second", "third", "fourth", "fifth", "sixth"];
+  for (const agentId of [...agents, ...agents]) {
     await use(agentId);
   }
-  expect(closedAgents()).toEqual(["second"]);
-  await use("first");
-  expect(opened).toHaveLength(5);
-  await use("second");
-  expect(opened).toHaveLength(6);
-  expect(closedAgents()).toEqual(["second", "third"]);
-});
-
-it("keeps a shared creating owner out of idle eviction until its last borrower releases", async () => {
-  const options = {
-    agentId: "creating",
-    env,
-    path: path.join(env.OPENCLAW_STATE_DIR!, "creating.sqlite"),
-  };
-  const constraints = { expectedCreationIdentity: readDatabasePathIdentitySync(options.path) };
-  const first = captureOpenClawAgentDatabaseExecution(options, constraints);
-  const joining = captureOpenClawAgentDatabaseExecution(options, constraints);
-  try {
-    await first.prepare(source);
-    await first.release();
-    for (const agentId of ["first", "second", "third", "fourth", "fifth"]) {
-      await use(agentId);
-    }
-    expect(closedAgents()).toEqual(["first"]);
-    await joining.prepare(source);
-    expect(opened.filter(({ agentId }) => agentId === "creating")).toHaveLength(1);
-    const ordinary = captureOpenClawAgentDatabaseExecution(options);
-    try {
-      await expect(ordinary.prepare(source)).rejects.toThrow(/captured creating reference/);
-    } finally {
-      await ordinary.release();
-    }
-  } finally {
-    await Promise.allSettled([first.release(), joining.release()]);
-  }
+  expect(opened.map(({ agentId }) => agentId)).toEqual(agents);
+  expect(closedAgents()).toEqual([]);
 });
 
 it("expires each executor independently and refreshes only the borrowed one", async () => {
@@ -180,45 +149,6 @@ it("retires only the selected physical store and shares its directory alias", as
   await use("first");
   await use("second");
   expect(opened.map(({ agentId }) => agentId)).toEqual(["first", "second", "first"]);
-});
-
-it("keeps a reborrow live while another idle executor is being evicted", async () => {
-  for (const agentId of ["first", "second", "third", "fourth"]) {
-    await use(agentId);
-  }
-  const evicting = createDeferredCore();
-  const entered = createDeferredCore();
-  const first = opened[0];
-  assert(first);
-  first.close.mockImplementationOnce(() => {
-    entered.resolve();
-    return evicting.promise;
-  });
-  const fifth = capture("fifth");
-  await fifth.prepare(source);
-  const releasing = fifth.release();
-  await entered.promise;
-  const borrowed = capture("fifth");
-  evicting.resolve();
-  await releasing;
-  await borrowed.prepare(source);
-  expect(opened).toHaveLength(5);
-  expect(closedAgents()).toEqual(["first"]);
-  await borrowed.release();
-});
-
-it("retains failed eviction custody without retaining a fifth idle executor", async () => {
-  for (const agentId of ["first", "second", "third", "fourth"]) {
-    await use(agentId);
-  }
-  const first = opened[0];
-  assert(first);
-  first.close.mockRejectedValueOnce(new Error("synthetic cleanup failure"));
-  await use("fifth");
-  expect(closedAgents()).toEqual(["first", "fifth"]);
-  await use("sixth");
-  expect(first.close).toHaveBeenCalledTimes(2);
-  expect(closedAgents()).toEqual(["first", "fifth"]);
 });
 
 it.each(["removal", "rename", "agent path", "session path"] as const)(

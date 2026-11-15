@@ -220,6 +220,29 @@ describe("executeAgentTurn: run lifecycle and ownership", () => {
     }
   });
 
+  // NakedClaw: hidden message-tool-only runs have no live stream consumer (assumption 6).
+  it.each([
+    { messageProvider: "kazusa-brain", mode: "message_tool_only", suppressed: true },
+    { messageProvider: "webchat", mode: "message_tool_only", suppressed: false },
+    { messageProvider: "kazusa-brain", mode: undefined, suppressed: false },
+  ] as const)(
+    "suppresses live stream output only without a consumer ($messageProvider, $mode)",
+    async ({ messageProvider, mode, suppressed }) => {
+      state.runEmbeddedAgentMock.mockResolvedValueOnce({ payloads: [{ text: "ok" }], meta: {} });
+      state.isInternalMessageChannelMock.mockImplementation((value) => value === "webchat");
+      const followupRun = createFollowupRun();
+      followupRun.run.messageProvider = messageProvider;
+      followupRun.run.sourceReplyDeliveryMode = mode;
+      const executeAgentTurn = await getExecuteAgentTurnForTest();
+      await executeAgentTurn(createMinimalRunAgentTurnParams({ followupRun }));
+      const embeddedCall = requireRecord(
+        state.runEmbeddedAgentMock.mock.calls[0]?.[0],
+        "runEmbeddedAgent params",
+      );
+      expect(embeddedCall.suppressLiveStreamOutput).toBe(suppressed);
+    },
+  );
+
   it("propagates reply aborts through fallback orchestration and candidates", async () => {
     const controller = new AbortController();
     const { replyOperation } = createMockReplyOperation({ abortSignal: controller.signal });

@@ -11,6 +11,7 @@ import { resolveGroupSessionKey } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { resolveSessionPinnedHarnessId } from "../../sessions/agent-harness-session-key.js";
 import {
+  isInternalMessageChannel,
   isMarkdownCapableMessageChannel,
   resolveMessageChannel,
 } from "../../utils/message-channel.js";
@@ -141,6 +142,19 @@ export async function runEmbeddedFallbackCandidate(
         sandboxSessionKey: turn.runtimePolicySessionKey,
         explicitSkillSelections: turn.followupRun.explicitSkillSelections,
         forceMessageTool: turn.followupRun.run.sourceReplyDeliveryMode === "message_tool_only",
+        // NakedClaw: a run hidden from the Control UI that replies only through the
+        // message tool and streams no blocks or reasoning has no consumer for
+        // per-token output (nakedclaw skill, assumption 6). The text buffer still
+        // fills; live parsing and its event fan-out are skipped.
+        suppressLiveStreamOutput:
+          turn.followupRun.run.sourceReplyDeliveryMode === "message_tool_only" &&
+          !turn.blockStreamingEnabled &&
+          !turn.opts?.onReasoningStream &&
+          !isInternalMessageChannel(
+            turn.followupRun.run.messageProvider ??
+              turn.sessionCtx.Surface ??
+              turn.sessionCtx.Provider,
+          ),
         suppressTranscriptOnlyAssistantPersistence:
           turn.followupRun.run.suppressTranscriptOnlyAssistantPersistence,
         assistantErrorTranscript: params.assistantErrorTranscript,

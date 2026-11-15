@@ -133,6 +133,9 @@ export function startGatewayEventSubscriptions(params: GatewayEventSubscriptionP
     broadcastToConnIds: params.broadcastToConnIds,
   });
   const unsubscribeObserverEvents = onAgentRuntimeEvent((evt) => {
+    if (sessionObserver.isIdleFor(evt)) {
+      return;
+    }
     void sessionObserver
       .handleEventAsync(evt)
       .catch((error: unknown) => params.log.warn("Session observer event failed", { error }));

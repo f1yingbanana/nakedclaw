@@ -84,6 +84,14 @@ export function createSessionObserverAudience(params: {
     recipients,
     criticalRecipients: (sessionKey: string, agentId: string) =>
       recipients(sessionKey, agentId, true),
+    /** No connection can see this session (true without a routable session). */
+    isUnwatched(sessionKey: string | undefined, agentId: string | undefined) {
+      const key = sessionKey?.trim();
+      const agent = agentId?.trim();
+      return (
+        !key || !agent || (classify(key, agent) === "none" && recipients(key, agent).size === 0)
+      );
+    },
   };
 }
 

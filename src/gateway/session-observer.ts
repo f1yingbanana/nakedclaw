@@ -709,6 +709,11 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
   return {
     handleEvent: work.handleEvent,
     handleEventAsync: work.handleEventAsync,
+    // NakedClaw: no tracked state and no audience: the event changes nothing; a
+    // later viewer is picked up at the next run start (nakedclaw skill, assumption 6).
+    isIdleFor: (event) =>
+      states.size + dormantRuns.size + pendingTerminalErrors.size === 0 &&
+      audience.isUnwatched(event.sessionKey, event.agentId),
     setConnectionVisibility(connId, visible) {
       if (visible) {
         visibleConnections.add(connId);

@@ -232,6 +232,8 @@ describe("startGatewayEventSubscriptions", () => {
         ...createParams(),
         signal: connectionWork.signal,
       });
+      // NakedClaw: these events have no session audience; keep testing close ordering.
+      vi.spyOn(unsubs.sessionObserver, "isIdleFor").mockReturnValue(false);
       const observe = vi.spyOn(unsubs.sessionObserver, "handleEventAsync");
       const emit = () =>
         emitAgentEvent({ runId: "closing-observer", stream: "assistant", data: { text: "late" } });

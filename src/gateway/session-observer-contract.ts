@@ -13,6 +13,8 @@ export type SessionObserverService = {
   /** @deprecated Use handleEventAsync; retained until the next Plugin SDK major. */
   handleEvent: (event: SessionObserverEvent) => void;
   handleEventAsync: (event: SessionObserverEvent) => Promise<void>;
+  /** NakedClaw: true when the event cannot change observer state or reach a viewer. */
+  isIdleFor: (event: SessionObserverEvent) => boolean;
   setConnectionVisibility: (connId: string, visible: boolean) => void;
   removeConnection: (connId: string) => void;
   /** @deprecated Use getCompanionSnapshotAsync; retained until the next Plugin SDK major. */

@@ -523,7 +523,7 @@ export function createAgentDatabaseExecution(
             }
             // NakedClaw: every agent keeps its executor until the idle TTL or a
             // restart drain. Upstream kept four and closed the rest, so a full
-            // cast reopened its databases ~120 times a minute (nakedclaw skill, stage 2).
+            // cast reopened its databases ~120 times a minute (nakedclaw skill, assumption 1).
             if (canRetain()) {
               executionState.idle.add(owner);
               const timer = runInExecutionOwnerContext(() =>

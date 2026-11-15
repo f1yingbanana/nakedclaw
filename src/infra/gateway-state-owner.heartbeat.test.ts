@@ -539,7 +539,7 @@ it("renews retained custody during synchronous work and never touches a successo
     const exited = once(worker, "exit");
     // NakedClaw: the worker's loss report reaches the owner on the next turn;
     // callers no longer re-read the lock synchronously (nakedclaw skill, assumption 2).
-    await vi.waitFor(() => expect(() => retained.assertCurrent()).toThrow());
+    await vi.waitFor(() => expect(() => retained.assertCurrent()).toThrow("no longer current"));
     retained.release();
     await exited;
     expect(fs.readFileSync(gateway.lockPath, "utf8")).toBe("successor");

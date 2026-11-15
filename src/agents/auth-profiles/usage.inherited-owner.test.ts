@@ -210,15 +210,30 @@ describe("inherited auth-profile usage persistence", () => {
     replaceRuntimeAuthProfileStoreSnapshots([{ agentDir: mainAgentDir, store: contaminated }]);
     expectSharedOnly(ensureAuthProfileStore(mainAgentDir));
 
-    await markAuthProfileSuccess({
+    const success = () =>
+      markAuthProfileSuccess({
+        store: loaded,
+        profileId,
+        provider: "anthropic",
+        agentDir: mainAgentDir,
+      });
+    // NakedClaw: a clean profile's success writes no ordering metadata (assumption 5).
+    await success();
+    expect(loadPersistedAuthProfileStore(mainAgentDir)?.usageStats?.[profileId]?.lastUsed).toBe(1);
+    // A failure recorded by any run in this process makes the next success clear it.
+    await markAuthProfileFailure({
       store: loaded,
       profileId,
-      provider: "anthropic",
+      reason: "rate_limit",
       agentDir: mainAgentDir,
     });
     expect(
-      loadPersistedAuthProfileStore(mainAgentDir)?.usageStats?.[profileId]?.lastUsed,
-    ).toBeGreaterThan(1);
+      loadPersistedAuthProfileStore(mainAgentDir)?.usageStats?.[profileId]?.errorCount,
+    ).toBeGreaterThan(0);
+    await success();
+    const stats = loadPersistedAuthProfileStore(mainAgentDir)?.usageStats?.[profileId];
+    expect(stats?.lastUsed).toBeGreaterThan(1);
+    expect(stats?.errorCount).toBe(0);
     await removeAuthProfilesAcrossOwnerStores({
       profileIds: [profileId],
       agentDir: mainAgentDir,

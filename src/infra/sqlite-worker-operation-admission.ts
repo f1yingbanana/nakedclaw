@@ -305,22 +305,16 @@ export function createSqliteWorkerOperationAdmission(
       );
       return;
     }
-    // NakedClaw: access asserted while receiving this request is not asserted
-    // again by a grant inside the same synchronous admission (nakedclaw skill,
-    // assumption 1); a grant issued later still re-checks.
-    let accessAssertedInReceive = false;
     const grant = (beforeRelease?: () => void) => {
       if (closed || expired() || Atomics.load(decision, 0) !== REQUESTED) {
         return false;
       }
       // Domain admission can reenter owner lifecycle before handing the native writer its grant.
-      if (!accessAssertedInReceive) {
-        try {
-          inOwnerContext(() => databaseAuthority?.assertAccess());
-        } catch (error) {
-          refuse(decision, error, "authority");
-          return false;
-        }
+      try {
+        inOwnerContext(() => databaseAuthority?.assertAccess());
+      } catch (error) {
+        refuse(decision, error, "authority");
+        return false;
       }
       if (closed || expired() || Atomics.load(decision, 0) !== REQUESTED) {
         return false;
@@ -341,7 +335,6 @@ export function createSqliteWorkerOperationAdmission(
         databaseAuthority?.assertRequest?.();
         databaseAuthority?.assertAccess();
       });
-      accessAssertedInReceive = true;
       if (
         request.stage === "prepare" &&
         isRecord(request.facts) &&
@@ -371,7 +364,6 @@ export function createSqliteWorkerOperationAdmission(
       refuse(decision, error, source);
       return;
     } finally {
-      accessAssertedInReceive = false;
       // Repeated preparation requests must not retain every settled decision.
       decisions.delete(decision);
     }

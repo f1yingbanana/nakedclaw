@@ -106,6 +106,8 @@ it("refreshes omitted cold previews after a history read without revoking sharin
       ]);
       expect(readSessionColdTranscript(database.db, scope.sessionId)).toBeUndefined();
       expect(projection.capture(query)?.sharingEntry).toEqual(sharingEntry);
+      // NakedClaw: the next reader materializes (nakedclaw skill, assumption 6).
+      await projection.ensureMaterialized();
       await withinTest(refreshed, signal);
       const after = await listSessions({ context, client, request });
       expect(after.sessions).toEqual([

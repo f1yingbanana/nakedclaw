@@ -366,7 +366,7 @@ export async function createSessionRowProjection(params: records.ProjectionOptio
     // Dirty keys retain failed background work for the next reader.
     // NakedClaw: per-session changes (every transcript append and entry write)
     // are materialized by the next reader, which always awaits
-    // ensureMaterialized(); only global changes refresh eagerly (nakedclaw skill, stage 4).
+    // ensureMaterialized(); only global changes refresh eagerly (nakedclaw skill, assumption 6).
     if ("all" in change) {
       void ensureMaterialized().catch(() => {});
     }
@@ -499,7 +499,7 @@ export async function createSessionRowProjection(params: records.ProjectionOptio
       revisions.invalidate();
       revisions.publishFacts(row);
       records.invalidateDatabaseFacts(row, retained);
-      // NakedClaw: the next reader materializes (nakedclaw skill, stage 4).
+      // NakedClaw: the next reader materializes (nakedclaw skill, assumption 6).
       dirty.add(id);
     },
   });

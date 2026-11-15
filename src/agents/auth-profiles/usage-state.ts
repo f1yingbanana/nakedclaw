@@ -1,5 +1,6 @@
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
+import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { isStringOption } from "../../utils/string-readers.js";
 import type { AuthProfileFailureReason, AuthProfileStore, ProfileUsageStats } from "./types.js";
 
@@ -46,6 +47,24 @@ export function hasAuthProfileFailureState(stats: ProfileUsageStats | undefined)
     stats.failureCounts !== undefined ||
     expiryWindows.some((fields) => fields.some((field) => stats[field] !== undefined))
   );
+}
+
+// NakedClaw: profiles whose failure this process recorded since their last
+// success write. A run checks its own store copy, which predates failures
+// recorded by concurrent runs, and one inherited cooldown can cover every agent
+// (nakedclaw skill, assumption 5).
+const profilesWithRecordedFailure = resolveGlobalSingleton(
+  Symbol.for("openclaw.naked.authProfilesWithRecordedFailure"),
+  () => new Set<string>(),
+);
+
+export function noteAuthProfileFailureRecorded(profileId: string): void {
+  profilesWithRecordedFailure.add(profileId);
+}
+
+/** Consumes the note; a success that then fails to write restores it. */
+export function takeAuthProfileFailureRecorded(profileId: string): boolean {
+  return profilesWithRecordedFailure.delete(profileId);
 }
 
 /** Clears failure windows while preserving unrelated usage history. */

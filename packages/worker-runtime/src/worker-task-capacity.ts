@@ -1,5 +1,5 @@
 // NakedClaw: sized for a full cast's startup burst (145 agents) instead of
-// refusing the tail of it (nakedclaw skill, stage 2).
+// refusing the tail of it (nakedclaw skill, assumption 1).
 export const DEFAULT_WORKER_PENDING_TASKS = 4096;
 export const DEFAULT_WORKER_PENDING_BYTES = 256 * 1024 * 1024;
 

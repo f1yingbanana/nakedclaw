@@ -58,6 +58,7 @@ import {
   isAuthCooldownBypassedForProvider,
   isBlockedWindowActiveForModel,
   isCooldownScopedToDifferentModel,
+  noteAuthProfileFailureRecorded,
   resolveInlineProviderApiKeyUsageId,
 } from "./usage-state.js";
 import { withAuthProfileUsage } from "./usage-write.js";
@@ -580,6 +581,7 @@ export async function markAuthProfileFailure(params: {
   if (reason === "no_error_details" && !shouldProbeWham) {
     return;
   }
+  noteAuthProfileFailureRecorded(profileId);
 
   const result = await runAuthProfileUsage(async () => {
     const personal = isUserModelAuthProfileId(profileId)
@@ -654,6 +656,7 @@ export async function markAuthProfileBlockedUntil(params: {
   ) {
     return;
   }
+  noteAuthProfileFailureRecorded(profileId);
 
   let result: PersonalAuthProfileUsageResult | undefined;
   const updated = await updateOwnedAuthProfileUsage(store, profileId, {

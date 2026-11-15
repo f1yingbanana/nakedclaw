@@ -300,23 +300,23 @@ it.each(["drain", "timeout"] as const)(
       if (action === "drain") {
         closing = drainGlobalSingletonLifecycleState("restart");
       } else {
-        vi.advanceTimersByTime(9_999);
+        // NakedClaw: waiters keep waiting past 10 s; the delay is only logged
+        // (nakedclaw skill, assumption 1). The caller's cancellation still ends them.
+        vi.advanceTimersByTime(10_000);
         await Promise.resolve();
         expect(settled).toBe(false);
-        vi.advanceTimersByTime(1);
-      }
-      for (const outcome of await waiters) {
-        expect(outcome).toMatchObject({
-          status: "rejected",
-          reason: { code: "overloaded" },
-        });
-      }
-      if (action === "timeout") {
-        expect(warn).toHaveBeenCalledTimes(1);
         expect(warn).toHaveBeenCalledWith("SQLite worker admission delayed", {
           queueDepth: 2,
           waitMs: 10_000,
         });
+        cancel.abort(reason);
+      }
+      for (const outcome of await waiters) {
+        expect(outcome).toMatchObject(
+          action === "drain"
+            ? { status: "rejected", reason: { code: "overloaded" } }
+            : { status: "rejected", reason },
+        );
       }
     } finally {
       vi.useRealTimers();

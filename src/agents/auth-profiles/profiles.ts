@@ -45,7 +45,11 @@ import {
 } from "./store.js";
 import type { AuthProfileCredential, AuthProfileStore } from "./types.js";
 import { runAuthProfileUsage } from "./usage-lifecycle.js";
-import { hasAuthProfileFailureState } from "./usage-state.js";
+import {
+  hasAuthProfileFailureState,
+  noteAuthProfileFailureRecorded,
+  takeAuthProfileFailureRecorded,
+} from "./usage-state.js";
 import { withAuthProfileUsage } from "./usage-write.js";
 export {
   dedupeProfileIds,
@@ -643,11 +647,13 @@ export async function markAuthProfileSuccess(params: {
   ) {
     return;
   }
-  // NakedClaw: a clean profile's success only refreshes ordering metadata, and
-  // upstream paid one auth write plus an O(agents) snapshot publication for it on
-  // every model call (nakedclaw skill, stage 3). A failure recorded after this
-  // run loaded its store is cleared by the next run's success.
+  // NakedClaw: with one credential per provider (assumption 5) a clean profile's
+  // success only refreshes ordering metadata, which upstream wrote and then
+  // republished to every agent snapshot on each model call. It is written only
+  // when the run's store shows failure state or this process recorded a failure.
+  const failureRecorded = takeAuthProfileFailureRecorded(profileId);
   if (
+    !failureRecorded &&
     !isUserModelAuthProfileId(profileId) &&
     !hasAuthProfileFailureState(store.usageStats?.[profileId])
   ) {
@@ -663,6 +669,9 @@ export async function markAuthProfileSuccess(params: {
     );
   });
   if (updated === null) {
+    if (failureRecorded) {
+      noteAuthProfileFailureRecorded(profileId);
+    }
     logDroppedAuthProfileBookkeeping("success", profileId);
   }
 }

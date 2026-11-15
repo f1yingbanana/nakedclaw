@@ -429,8 +429,9 @@ export function acquireGatewayStateOwner(params: {
   owners.set(pathname, owner);
   const lease = leaseForFile(pathname, lock, owner);
   try {
-    owner.heartbeat = startGatewayStateOwnerHeartbeat(owner.locks, (error) =>
-      loseOwner(owner, error),
+    owner.heartbeat = startGatewayStateOwnerHeartbeat(
+      owner.locks,
+      (error) => owner.locks.size > 0 && loseOwner(owner, error),
     );
     lease.assertCurrent();
   } catch (error) {
@@ -551,8 +552,9 @@ export function acquireStateDatabaseSchemaLease(
   }
   const lease = leaseForFile(pathname, lock, owner, projection);
   try {
-    const heartbeat = (owner.heartbeat ??= startGatewayStateOwnerHeartbeat(owner.locks, (error) =>
-      loseOwner(owner, error),
+    const heartbeat = (owner.heartbeat ??= startGatewayStateOwnerHeartbeat(
+      owner.locks,
+      (error) => owner.locks.size > 0 && loseOwner(owner, error),
     ));
     const raw = fs.readFileSync(projection.lockPath, "utf8");
     lease.assertCurrent();

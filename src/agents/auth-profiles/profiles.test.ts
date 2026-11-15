@@ -1922,10 +1922,8 @@ describe("setAuthProfileOrder", () => {
         provider: "gmi-cloud",
         store: runtimeStore,
       });
-      expect(loadPersistedAuthProfileStore(agentDir)?.lastGood).toEqual({
-        openai: "openai:other",
-        gmi: secondary,
-      });
+      // NakedClaw: a clean profile's success writes no lastGood (nakedclaw skill, assumption 5).
+      expect(loadPersistedAuthProfileStore(agentDir)?.lastGood).toEqual(seeded().lastGood);
 
       saveAuthProfileStore(seeded(), agentDir);
       clearRuntimeAuthProfileStoreSnapshots();

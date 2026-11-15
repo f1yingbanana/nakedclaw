@@ -104,12 +104,31 @@ an open/read/parse of the owner lock file, often several times per operation
 - A Gateway that holds its owner in memory trusts it: no per-access lock-file
   verification. Loss of the lock is detected by the heartbeat worker (now wired
   to `loseOwner`) instead of by the next write (assumption 2).
-- Duplicate checks in one admission (on receive and again in `grant()`) run
-  once.
+- Admission still checks access on receive and again in `grant()`. Cutting the
+  second check was tried and reverted: after the cuts above it costs ~0.05% of
+  main time, and it is the only guard if an `admit` callback revokes the owner
+  before granting (a shared-state test does exactly that).
 
-What we lose: a deleted or replaced lock or database file is noticed within the
-heartbeat interval rather than on the next write. Under assumption 2 that never
-happens.
+What we lose, and how loss is now detected:
+
+- The heartbeat worker renews the root owner lock every 15 s through a held fd
+  and reports ENOENT or a replaced inode. That report aborts `owner.lost`, and
+  the Gateway closes (`gateway/server.ts`). So anything that deletes or
+  replaces the root lock stops the Gateway within ~15 s instead of failing the
+  next write. If the worker itself stalls, `heartbeat.inspect()` on the main
+  thread renews and re-verifies after 60 s.
+- Reports delivered after the owner's final lock release are ignored (one can
+  be queued just before `stop()`).
+- The projection sidecar (`gateway.state.lock`) is not watched at all: the
+  worker silently forgets non-root locks, and the parent no longer re-reads it.
+  Losing it goes unnoticed until restart.
+- Database file identity (dev/ino/birthtime) is still read on every check; that
+  `stat` is what catches OpenClaw's own delete-and-recreate of a database.
+- The path memo covers every SQLite path that goes through
+  `resolveDatabasePathKey`, including temporary snapshot and staging
+  databases, so it is bounded (cleared at 4,096 entries).
+- Worker threads still read the lock file per access (their owner map is empty);
+  that costs worker time, not main-thread time.
 
 ### Stage 2: caps that cause churn (lease close/reopen, refusals)
 
@@ -119,8 +138,20 @@ happens.
   every agent keeps one open executor.
 - `MAX_STORES = 64` in the worker broker refuses stores beyond 64 ("SQLite
   worker queue capacity reached"). Removed.
-- A full worker queue waits instead of failing after 10 s; that refusal used to
-  become a boot-long "inspection-failed" refusal of the agent.
+- A full per-worker queue (128 requests) waits instead of failing after 10 s;
+  that refusal used to become a boot-long "inspection-failed" refusal of the
+  agent. The 256 MB queued-bytes budget and oversized inputs still refuse at
+  once, and waiters hold their bytes in that budget, so a stalled slot can
+  still cause the old refusal on other slots under extreme load.
+- Idle executors stay open until `SQLITE_IDLE_HANDLE_TTL_MS` (30 min), a
+  restart drain or shutdown: ~3 fds and up to ~2 MB page cache each. Their
+  drain listeners make the restart-drain signal unlimited-listener.
+- Shutdown now closes ~145 open agent databases (each a WAL checkpoint) within
+  the 10 s native-close reserve. A forced exit leaves `-wal` files, which SQLite
+  replays on the next open. Anything that snapshots a world (git saves) must
+  checkpoint first or include the `-wal` files.
+- With `shareWorkers=false` (Bun only, not Node) the removed store cap means
+  one worker thread per store.
 - Worker task pools accept 4,096 pending tasks instead of 128, so a full
   cast's startup burst is not refused.
 - Per-agent SQLite page cache stays at SQLite's default unless the A/B shows
@@ -136,16 +167,28 @@ Every successful model call records `lastUsed` for its auth profile, then
 publishes the change by re-reading auth rows for every warmed agent snapshot
 (O(agents) reads per call). With one credential per provider (assumption 5),
 ordering and last-good have no effect. Success bookkeeping is skipped unless the
-profile currently carries failure state (error count, cooldown, disabled), so
-recovery from a provider outage still clears the cooldown. Failure bookkeeping
-stays: it drives backoff.
+profile carries failure state (error count, failure counts, cooldown, blocked
+or disabled window) in the run's store, or this process recorded a failure for
+it since its last success write (`noteAuthProfileFailureRecorded`). The second
+condition matters: each run checks its own store copy, which predates failures
+recorded by concurrent runs, and one inherited cooldown covers every agent.
+Without it a single 429 during a burst would stall the whole cast for the
+cooldown window. Failure bookkeeping stays: it drives backoff.
+
+Leftover: when an expired non-rate-limit cooldown is cleared in memory by
+ordering, its stale counters stay on disk until the next failure. Behavior is
+unaffected; only status displays show them.
 
 ### Stage 4: session and transcript side-work (≈11%)
 
 - Session list row projection is no longer rebuilt eagerly on every
-  per-session transcript or entry event; the next reader materializes it (every
-  reader already awaits `ensureMaterialized()`). Global changes still refresh
-  eagerly. Gateway WebSocket clients (Control UI) may get live lifecycle events
+  per-session transcript or entry event; the next reader materializes it.
+  Readers either await `ensureMaterialized()` (sessions.resolve, cron, list)
+  or tolerate dirty rows (`describe` refreshes them from retained facts,
+  `selectEntries` acquires them). Global changes still refresh eagerly. Cron
+  job events also drain materialization, so with cron wakes the saving is
+  batching rather than elimination; the first `sessions.list` after a burst
+  pays the refresh. Gateway WebSocket clients (Control UI) may get live lifecycle events
   without row enrichment until they read; Kazusa does not use them.
 - Measured and left alone: the transcript-update broadcaster (<0.2%, already
   cheap without subscribers) and the session observer's per-event read capture
@@ -219,16 +262,73 @@ keyed-store v2 API with multi-store transactions in 2026.11.x.
 Base: `v2026.10.5` (1b58cb9a1b4). Stock attribution is from four burst-minute
 profiles (`kazusa/.perf/demo/runs/r4/a`, `r5/b`).
 
-| Commit                                                                | Stage | Cut                                                                                                                                                                                                                                                      | Assumption | Stock share it targets                                                                                                                     |
-| --------------------------------------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `perf(naked): trust verified state ownership and memoize state paths` | 1     | owner lock + projection read once, heartbeat loss wired to `loseOwner`; owner path, canonical DB path, agent-dir and session-candidate identities memoized (`memoizeStatePathResolver`); one `stat` per identity; no duplicate access check in `grant()` | 2, 3       | `assertStateDatabaseAccessAllowed` 8.2%, `resolveDatabasePathKey` 6.0%, read candidates 1.6%, admission grant re-check ~2.6% (overlapping) |
-| `perf(naked): remove executor, store and queue caps`                  | 2     | no `MAX_IDLE_EXECUTORS`, no `MAX_STORES`, queue waits instead of 10 s refusal, pending tasks 128 → 4096                                                                                                                                                  | 1          | ~120 lease close/reopen cycles/min; boot-long agent refusals                                                                               |
-| `perf(naked): skip auth success bookkeeping for clean profiles`       | 3     | success writes only when failure state exists                                                                                                                                                                                                            | 5          | ~3,800 auth writer ops/min, `publishInlineAuthFailure` 3.3%                                                                                |
-| `perf(naked): materialize session rows on read`                       | 4     | no eager row refresh for per-session changes                                                                                                                                                                                                             | 1, 6       | row refresh ~1.7%                                                                                                                          |
+| Commit                                                                | Stage | Cut                                                                                                                                                                                                              | Assumption | Stock share it targets                                                                                                                     |
+| --------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `perf(naked): trust verified state ownership and memoize state paths` | 1     | owner lock + projection read once, heartbeat loss wired to `loseOwner`; owner path, canonical DB path, agent-dir and session-candidate identities memoized (`memoizeStatePathResolver`); one `stat` per identity | 2, 3       | `assertStateDatabaseAccessAllowed` 8.2%, `resolveDatabasePathKey` 6.0%, read candidates 1.6%, admission grant re-check ~2.6% (overlapping) |
+| `perf(naked): remove executor, store and queue caps`                  | 2     | no `MAX_IDLE_EXECUTORS`, no `MAX_STORES`, queue waits instead of 10 s refusal, pending tasks 128 → 4096                                                                                                          | 1          | ~120 lease close/reopen cycles/min; boot-long agent refusals                                                                               |
+| `perf(naked): skip auth success bookkeeping for clean profiles`       | 3     | success writes only when failure state exists                                                                                                                                                                    | 5          | ~3,800 auth writer ops/min, `publishInlineAuthFailure` 3.3%                                                                                |
+| `perf(naked): materialize session rows on read`                       | 4     | no eager row refresh for per-session changes                                                                                                                                                                     | 1, 6       | row refresh ~1.7%                                                                                                                          |
+| `fix(naked): address review findings`                                 | 1-3   | see Review below                                                                                                                                                                                                 | 1, 2, 5    | —                                                                                                                                          |
 
 Stage 5 (worker ceremony) is deferred: after Stage 1 its remaining measured
 pieces are each ≤0.5% (env merge 0.5%, state context 0.3-0.6%, per-op admission
 channel 0.4%). The post-strip profile decides whether in-process execution of
 small operations is worth its risk.
 
-Measured effect: see the next entry (pair `n1`, `kazusa/.perf/naked/runs/`).
+### Measured: pair `n1` (stages 1-4, 2026-11-15)
+
+Stock 10.5 vs NakedClaw, two clones of the 145-character snapshot side by side,
+same Kazusa plugin (all perf fixes), 48 brains, clock jumped 60 sim-minutes
+(burst), 15 minutes (`kazusa/.perf/demo/runs/n1`):
+
+|                                | stock  | NakedClaw     |
+| ------------------------------ | ------ | ------------- |
+| main ms per model call         | 347    | 266 (−23%)    |
+| main ms per (model + Jev) call | 126    | 94 (−25%)     |
+| process CPU, cores             | 0.67   | 0.44 (−34%)   |
+| worker ops/min                 | 14,403 | 5,588 (−61%)  |
+| auth writer ops/min            | 4,250  | 21            |
+| burst-minute main busy         | 46.4 s | 23.8 s (−49%) |
+| of which DB guards             | 10.2 s | 1.2 s         |
+| of which worker plumbing       | 7.4 s  | 3.1 s         |
+| of which sessions/transcripts  | 5.2 s  | 3.0 s         |
+
+Throughput was demand-limited in this pair (65-68 model calls/min both); the
+gain is headroom. After stage 4 no OpenClaw function exceeds ~2% self time:
+file-identity `stat` 1.6%, env clones ~1.9% spread over ten callers.
+
+### Review (three independent Opus reviews, 2026-11-15)
+
+No cut was found to lose or corrupt data, deadlock, or block restart recovery
+under the assumptions. Fixed after review: success bookkeeping for failures
+recorded by concurrent runs (above); heartbeat reports after final release;
+the admission `grant()` re-check, restored to upstream (the cut saved ~0.05%
+and dropped a guard a test exercises); unbounded path memo; restart-drain listener warning; comments citing
+stages instead of assumptions; loosened or outdated tests. Accepted and
+documented above: projection sidecar loss, byte-budget refusals, shutdown WAL,
+stale on-disk auth counters, Control UI enrichment.
+
+Tests changed by the fork, after review: tests that waited for removed
+timeouts or refused at removed caps (10 s queue/open timeout, 64 stores, 128
+pending tasks, 4 idle executors), tests of symlink retarget under state paths,
+and tests that expected a clean auth success to write `lastUsed`/`lastGood` are
+deleted or rewritten to assert the new contract. A test that waits on a removed
+timeout does not fail fast: it hangs until vitest's limit and stalls the
+workers for the rest of its file, so run fork tests with a watchdog
+(`perl -e 'alarm 1500; exec @ARGV' pnpm test ...`). Last run: 212 touched test
+files, all passing (11 min).
+
+Known simplification left: on POSIX, `isSessionStoreReadCandidateCurrent`
+compares two memoized values and is always true, so its "selector changed
+during discovery" refusal is unreachable. Removing that machinery is a larger
+cut than its cost justifies today.
+
+### Tests run per stage
+
+`pnpm tsgo:core`; storage (`src/infra/gateway-*`, `sqlite-worker*`,
+`sqlite-store*`, `src/state/openclaw-agent-execution*`, `openclaw-state-db*`,
+`openclaw-agent-db*`, `src/config/sessions/session-store-*`,
+`session-accessor*`), `src/agents/auth-profiles/*`,
+`src/gateway/session-row-projection*`, `server-session-events*`,
+`src/process/gateway-work-admission`; changed files through
+`scripts/run-oxlint.mjs` and `oxfmt`. The full OpenClaw suite has not been run.

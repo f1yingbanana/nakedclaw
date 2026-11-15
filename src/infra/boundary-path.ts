@@ -50,19 +50,24 @@ export function resolveIdentityPathViaExistingAncestorSync(targetPath: string): 
  */
 export function memoizeStatePathResolver(
   resolve: (absolutePath: string) => string,
-): ((targetPath: string) => string) & { clear(): void } {
+): (targetPath: string) => string {
   const resolved = new Map<string, string>();
-  const lookup = (targetPath: string) => {
+  return (targetPath: string) => {
     const key = path.resolve(targetPath);
     let value = resolved.get(key);
     if (value === undefined) {
+      // Temporary SQLite paths (snapshots, staging) also pass through here.
+      if (resolved.size >= MAX_MEMOIZED_STATE_PATHS) {
+        resolved.clear();
+      }
       value = resolve(key);
       resolved.set(key, value);
     }
     return value;
   };
-  return Object.assign(lookup, { clear: () => resolved.clear() });
 }
+
+const MAX_MEMOIZED_STATE_PATHS = 4096;
 
 export const resolveStatePathIdentitySync = memoizeStatePathResolver(
   resolveIdentityPathViaExistingAncestorSync,

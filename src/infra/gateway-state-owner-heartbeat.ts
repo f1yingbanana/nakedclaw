@@ -54,8 +54,10 @@ export function startGatewayStateOwnerHeartbeat(
     worker.unref();
     // NakedClaw: callers no longer re-read the lock on every access (nakedclaw
     // skill, assumption 2), so the worker's report of a removed or replaced
-    // root lock is the loss signal. Transient renewal failures stay advisory;
-    // inspect() below still renews synchronously once the deadline passes.
+    // root lock is the loss signal. Owners ignore a report delivered after their
+    // final lock release (it can be queued just before stop()).
+    // Transient renewal failures stay advisory; inspect() still renews once
+    // the deadline passes.
     port1.on("message", (message: unknown) => {
       if (typeof message === "string" && message.endsWith("owner lock was removed or replaced")) {
         onLost(

@@ -143,7 +143,7 @@ export class SqliteWorkerBroker {
       return Promise.reject(new SqliteWorkerError("SQLite worker host is closing", "closed"));
     }
     // NakedClaw: no store-count cap; one Gateway opens every character's
-    // database (nakedclaw skill, stage 2).
+    // database (nakedclaw skill, assumption 1).
     const client = {};
     this.clients.add(client);
     let snapshot: PreparedSqliteWorkerOpen;
@@ -586,10 +586,9 @@ export class SqliteWorkerBroker {
         clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
         releaseInput();
-        const failure = error;
-        if (failure !== undefined) {
+        if (error !== undefined) {
           observation.completed();
-          reject(toErrorObject(failure, "SQLite worker admission failed"));
+          reject(toErrorObject(error, "SQLite worker admission failed"));
         } else {
           resolve(this.enqueue(slot, body, bytes, options, true, observation));
         }
@@ -597,7 +596,7 @@ export class SqliteWorkerBroker {
       const abort = () => resume(signal?.reason ?? new Error("SQLite worker operation canceled"));
       // NakedClaw: a full worker queue delays work instead of failing it after
       // 10 s; failed background preparation used to refuse an agent for the
-      // whole boot (nakedclaw skill, stage 2). Slow admission is still logged.
+      // whole boot (nakedclaw skill, assumption 1). Slow admission is still logged.
       const timer = setTimeout(() => {
         this.warnAdmission(this.waiters.get(slot)?.size ?? 0, Date.now() - started);
       }, ADMISSION_TIMEOUT_MS);

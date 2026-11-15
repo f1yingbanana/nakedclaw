@@ -52,7 +52,9 @@ type GatewayWorkAdmissionState = {
 
 const admissionLog = createSubsystemLogger("gateway/admission");
 
-function createShutdownCleanupController(): AbortController {
+// NakedClaw: every idle agent executor listens on the restart drain signal
+// (nakedclaw skill, assumption 1), so it is unlimited like shutdown cleanup.
+function createUnlimitedListenerController(): AbortController {
   const controller = new AbortController();
   setMaxListeners(0, controller.signal);
   return controller;
@@ -62,8 +64,8 @@ const GATEWAY_WORK_ADMISSION_STATE = resolveGlobalSingleton(
   Symbol.for("openclaw.gatewayWorkAdmissionState"),
   (): GatewayWorkAdmissionState => ({
     restartDrainReason: undefined,
-    restartDrainController: new AbortController(),
-    shutdownCleanupController: createShutdownCleanupController(),
+    restartDrainController: createUnlimitedListenerController(),
+    shutdownCleanupController: createUnlimitedListenerController(),
     restartSignalPending: false,
     restartSignalGeneration: 0,
     suspendPhase: "accepting",
@@ -724,9 +726,9 @@ export function resetGatewayWorkAdmission(): void {
   }
   GATEWAY_WORK_ADMISSION_STATE.activeRootWork.clear();
   GATEWAY_WORK_ADMISSION_STATE.restartDrainReason = undefined;
-  GATEWAY_WORK_ADMISSION_STATE.restartDrainController = new AbortController();
+  GATEWAY_WORK_ADMISSION_STATE.restartDrainController = createUnlimitedListenerController();
   GATEWAY_WORK_ADMISSION_STATE.shutdownCleanupController.abort();
-  GATEWAY_WORK_ADMISSION_STATE.shutdownCleanupController = createShutdownCleanupController();
+  GATEWAY_WORK_ADMISSION_STATE.shutdownCleanupController = createUnlimitedListenerController();
   GATEWAY_WORK_ADMISSION_STATE.restartSignalPending = false;
   GATEWAY_WORK_ADMISSION_STATE.restartSignalGeneration += 1;
   if (GATEWAY_WORK_ADMISSION_STATE.suspendPhase !== "accepting") {

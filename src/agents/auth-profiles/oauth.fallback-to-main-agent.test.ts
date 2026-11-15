@@ -297,7 +297,8 @@ describe("resolveApiKeyForProfile fallback to main agent", () => {
           profileId: alternateId,
           agentDir: mainAgentDir,
         });
-        expect(readAuthProfilesStore(mainAgentDir).lastGood?.openai).toBe(alternateId);
+        // NakedClaw: a clean profile's success writes no lastGood (nakedclaw skill, assumption 5).
+        expect(readAuthProfilesStore(mainAgentDir).lastGood).toBeUndefined();
       }
       expect(getOAuthApiKeyMock).toHaveBeenCalledOnce();
     },

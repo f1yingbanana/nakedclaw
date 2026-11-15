@@ -297,6 +297,28 @@ Throughput was demand-limited in this pair (65-68 model calls/min both); the
 gain is headroom. After stage 4 no OpenClaw function exceeds ~2% self time:
 file-identity `stat` 1.6%, env clones ~1.9% spread over ten callers.
 
+### Measured: pair `n2` (after review fixes, 2026-11-15)
+
+Same setup as `n1` (`kazusa/.perf/demo/runs/n2`):
+
+|                                | stock  | NakedClaw  |
+| ------------------------------ | ------ | ---------- |
+| model calls/min                | 46.0   | 68.7       |
+| brain runs/min                 | 24.4   | 32.0       |
+| main thread busy               | 33%    | 33%        |
+| main ms per model call         | 432    | 284 (−34%) |
+| main ms per (model + Jev) call | 183    | 126 (−31%) |
+| worker ops per model call      | 226    | 85 (−62%)  |
+| process CPU, cores             | 0.57   | 0.53       |
+| burst-minute main busy         | 45.2 s | 30.5 s     |
+| loop delay p99 worst           | 514 ms | 1,447 ms   |
+
+Same main-thread load carried ~49% more model calls. Provider timeouts
+(DeepSeek) differed between sides (89 vs 41 failed runs), so the throughput
+gap carries provider noise; per-call main time is the robust number (−23% in
+`n1`, −34% here). Both Gateways then waited out upstream's 315 s shutdown drain
+for brain runs blocked in tools: unchanged upstream behavior.
+
 ### Review (three independent Opus reviews, 2026-11-15)
 
 No cut was found to lose or corrupt data, deadlock, or block restart recovery

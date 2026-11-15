@@ -1,5 +1,5 @@
 import { cpus, type CpuInfo } from "node:os";
-import { createHistogram, performance, type RecordableHistogram } from "node:perf_hooks";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { isMainThread, Worker } from "node:worker_threads";
 import type { Static } from "typebox";
 import type { SchemaContract } from "../../../packages/gateway-protocol/src/schema-contract.js";
@@ -41,11 +41,20 @@ type GatewayEventLoopHealthMonitor = {
 
 type EventLoopUtilizationReader = typeof performance.eventLoopUtilization;
 
+export type EventLoopDelayHistogram = Pick<
+  ReturnType<typeof monitorEventLoopDelay>,
+  "enable" | "disable" | "reset" | "max" | "percentile"
+>;
+
 type GatewayEventLoopHealthMonitorDeps = {
   scheduler: GatewayScheduler;
   now?: () => number;
   cpuUsage?: typeof process.cpuUsage;
   eventLoopUtilization?: EventLoopUtilizationReader;
+  /** Tests feed a histogram from a fake clock; production samples the loop natively. */
+  delayHistogram?: () => EventLoopDelayHistogram;
+  /** How often health is computed from the histogram. */
+  sampleIntervalMs?: number;
 };
 
 type GatewayEventLoopHealthMetrics = Pick<
@@ -171,9 +180,9 @@ export function createGatewayEventLoopHealthMonitor(
   const readCpuUsage = deps.cpuUsage ?? process.cpuUsage.bind(process);
   const readEventLoopUtilization =
     deps.eventLoopUtilization ?? performance.eventLoopUtilization.bind(performance);
-  let histogram: RecordableHistogram | null = null;
-  let lastSampleAt = nowMs();
-  let lastWallAt = lastSampleAt;
+  let histogram: EventLoopDelayHistogram | null = null;
+  const sampleIntervalMs = deps.sampleIntervalMs ?? SUSTAINED_LOAD_SAMPLE_MIN_INTERVAL_MS;
+  let lastWallAt = nowMs();
   let lastCpuUsage = readCpuUsage();
   let lastMainThreadCpuUsage = readMainThreadCpuUsage();
   let lastHostCpuTimes = readHostCpuTimes();
@@ -268,8 +277,14 @@ export function createGatewayEventLoopHealthMonitor(
   };
 
   try {
-    // The default range covers 104 days; the int64 maximum fails on Linux Bun.
-    histogram = createHistogram({ lowest: 1_000, figures: 3 });
+    // NakedClaw: Node samples the loop natively at this resolution, recording the
+    // same interval-between-ticks values the 20 ms JS timer did, without waking
+    // the Gateway scheduler (and scanning its jobs) 50 times a second (nakedclaw
+    // skill, "timer service"). Health is computed by a once-a-second job below.
+    histogram =
+      deps.delayHistogram?.() ??
+      monitorEventLoopDelay({ resolution: EVENT_LOOP_MONITOR_RESOLUTION_MS });
+    histogram.enable();
   } catch {
     histogram = null;
   }
@@ -280,10 +295,6 @@ export function createGatewayEventLoopHealthMonitor(
     }
 
     const now = nowMs();
-    // A window reset must not erase the pending sample's monotonic anchor.
-    // Native interval histograms reset that anchor before an overdue callback runs.
-    histogram.record(BigInt(Math.max(1, Math.round((now - lastSampleAt) * 1_000_000))));
-    lastSampleAt = now;
     const intervalMs = Math.max(1, now - lastWallAt);
     const delayMaxMs = nanosecondsToMilliseconds(histogram.max);
     if (
@@ -361,8 +372,8 @@ export function createGatewayEventLoopHealthMonitor(
   const samplingJob = histogram
     ? scheduler.schedule({
         id: "event-loop-health",
-        atMs: scheduler.now() + EVENT_LOOP_MONITOR_RESOLUTION_MS,
-        everyMs: EVENT_LOOP_MONITOR_RESOLUTION_MS,
+        atMs: scheduler.now() + sampleIntervalMs,
+        everyMs: sampleIntervalMs,
         run: sample,
       })
     : undefined;
@@ -372,8 +383,7 @@ export function createGatewayEventLoopHealthMonitor(
 
   const reset = () => {
     histogram?.reset();
-    lastSampleAt = nowMs();
-    lastWallAt = lastSampleAt;
+    lastWallAt = nowMs();
     lastCpuUsage = readCpuUsage();
     lastMainThreadCpuUsage = readMainThreadCpuUsage();
     lastHostCpuTimes = readHostCpuTimes();
@@ -400,6 +410,7 @@ export function createGatewayEventLoopHealthMonitor(
     reset,
     stop: () => {
       samplingJob?.cancel();
+      histogram?.disable();
       histogram = null;
       cancelWorkerCpuSample?.();
       lastWorkerCpuWindow = undefined;

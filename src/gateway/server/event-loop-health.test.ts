@@ -1,5 +1,5 @@
 // Event-loop health tests cover sampling ownership and delay/load classification.
-import type { performance } from "node:perf_hooks";
+import { createHistogram, type performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getInternalDiagnosticEventSequence,
@@ -55,15 +55,35 @@ function createMonitorHarness(params?: { cpuMsPerWallMs?: number; utilization?: 
       utilization,
     }),
   );
+  // NakedClaw: production samples natively with monitorEventLoopDelay. The fake
+  // records the fake clock's interval at each 20 ms tick, as Node does natively.
+  const delay = createHistogram({ lowest: 1_000, figures: 3 });
+  let lastTickAt = nowMs;
+  const delayHistogram = {
+    enable: () => true,
+    disable: () => true,
+    reset: () => {
+      delay.reset();
+      lastTickAt = nowMs;
+    },
+    get max() {
+      return delay.max;
+    },
+    percentile: (percentile: number) => delay.percentile(percentile),
+  };
   const monitor = createGatewayEventLoopHealthMonitor({
     scheduler,
     now: () => nowMs,
     cpuUsage,
     eventLoopUtilization,
+    delayHistogram: () => delayHistogram,
+    sampleIntervalMs: 20,
   });
   monitors.push(monitor);
   const sample = async (elapsedMs = 20) => {
     nowMs += elapsedMs;
+    delay.record(BigInt(Math.max(1, Math.round((nowMs - lastTickAt) * 1_000_000))));
+    lastTickAt = nowMs;
     await clock.advanceTo(nowMs);
   };
   return {

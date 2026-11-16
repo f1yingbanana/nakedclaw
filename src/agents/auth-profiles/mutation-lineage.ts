@@ -1,5 +1,5 @@
-import { resolveSharedAuthStorePath, type AuthProfileOwnerScope } from "./path-resolve.js";
-import { resolveAuthProfileDatabasePath } from "./sqlite.js";
+import type { AuthProfileOwnerScope } from "./path-resolve.js";
+import { resolveAuthProfileStorePath } from "./sqlite.js";
 
 type PersistedMutationRecord = {
   credentialRevision: number;
@@ -27,10 +27,10 @@ export type RuntimeAuthProfileStoreMutationOwner =
   | { kind: "resolved"; databasePath: string; sharedDatabasePath: string }
   | { kind: "unresolved"; databasePath: string; scope: AuthProfileOwnerScope };
 
-// Runtime snapshots are keyed by the canonical database path so default-agent
-// and per-agent stores do not overwrite each other.
+// Runtime snapshots are keyed by the database that holds the credentials:
+// NakedClaw: the shared store for every agent but a scoped run's (assumption 7).
 export function resolveRuntimeStoreKey(agentDir?: string, env?: NodeJS.ProcessEnv): string {
-  return agentDir ? resolveAuthProfileDatabasePath(agentDir) : resolveSharedAuthStorePath(env);
+  return resolveAuthProfileStorePath(agentDir, env);
 }
 
 function maxMutationRevision(record: PersistedMutationRecord): number {

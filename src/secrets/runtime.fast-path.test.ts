@@ -73,9 +73,9 @@ function emptyAuthStore(): AuthProfileStore {
   return { version: 1, profiles: {} };
 }
 
-function writeAuthProfileStore(agentDir: string): void {
+function writeAuthProfileStore(agentDir: string, save = saveAuthProfileStore): void {
   mkdirSync(agentDir, { recursive: true });
-  saveAuthProfileStore(
+  save(
     createAuthProfileStoreFixture({
       "openai:default": {
         type: "api_key",
@@ -98,6 +98,7 @@ describe("secrets runtime fast path", () => {
     clearRuntimeConfigSnapshot();
     clearConfigCache();
     closeOpenClawAgentDatabasesForTest();
+    vi.unstubAllEnvs();
     vi.resetModules();
   });
 
@@ -237,17 +238,18 @@ describe("secrets runtime fast path", () => {
     }
   });
 
-  it("skips the startup-only fast path when the inherited main auth store exists", async () => {
+  it("skips the startup-only fast path when the shared auth store exists", async () => {
     const { prepareSecretsRuntimeFastPathSnapshot } = await import("./runtime-fast-path.js");
     const root = mkdtempSync(path.join(tmpdir(), "openclaw-runtime-fast-path-"));
     const env: NodeJS.ProcessEnv = {
       HOME: root,
       OPENCLAW_STATE_DIR: root,
     };
-    const mainAgentDir = path.join(root, "agents", "main", "agent");
     const agentDir = path.join(root, "custom-agent");
     mkdirSync(agentDir, { recursive: true });
-    writeAuthProfileStore(mainAgentDir);
+    // Runtime writes land in the shared store of the process state dir (assumption 7).
+    vi.stubEnv("OPENCLAW_STATE_DIR", root);
+    writeAuthProfileStore(agentDir);
 
     try {
       const snapshot = prepareSecretsRuntimeFastPathSnapshot({
@@ -266,12 +268,12 @@ describe("secrets runtime fast path", () => {
   });
 
   it("refreshes startup-only fast-path snapshots from persisted auth stores after startup", async () => {
-    const { ensureAuthProfileStoreWithoutExternalProfiles } =
-      await import("../agents/auth-profiles/store-runtime.js");
     const { prepareSecretsRuntimeFastPathSnapshot } = await import("./runtime-fast-path.js");
     const { activateSecretsRuntimeSnapshotState, getActiveSecretsRuntimeSnapshotState } =
       await import("./runtime-state.js");
     const { refreshActiveProviderAuthRuntimeSnapshot } = await import("./runtime.js");
+    const { saveAuthProfileStore: saveRuntimeAuthProfileStore } =
+      await import("../agents/auth-profiles/store-runtime.js");
     const root = mkdtempSync(path.join(tmpdir(), "openclaw-runtime-fast-path-refresh-"));
     const env: NodeJS.ProcessEnv = {
       HOME: root,
@@ -296,15 +298,15 @@ describe("secrets runtime fast path", () => {
         refreshContext: fastPath!.refreshContext,
         refreshHandler: null,
       });
-      writeAuthProfileStore(agentDir);
-
-      expect(
-        ensureAuthProfileStoreWithoutExternalProfiles(agentDir).profiles["openai:default"],
-      ).toBeUndefined();
+      vi.stubEnv("OPENCLAW_STATE_DIR", root);
+      writeAuthProfileStore(agentDir, saveRuntimeAuthProfileStore);
 
       await expect(refreshActiveProviderAuthRuntimeSnapshot()).resolves.toBe(true);
       const active = getActiveSecretsRuntimeSnapshotState();
-      expect(active?.authStores[0]?.agentDir).toBe(agentDir);
+      // The first write bootstraps the shared store in the state database.
+      expect(active?.authStores.map((entry) => entry.databasePath)).toEqual([
+        path.join(root, "state", "openclaw.sqlite"),
+      ]);
       expect(active?.authStores[0]?.store.profiles["openai:default"]).toMatchObject({
         type: "api_key",
         provider: "openai",
@@ -372,13 +374,14 @@ describe("secrets runtime fast path", () => {
       "openai:default": { type: "api_key", provider: "openai", key: "sk-new" },
     });
     let mutateDuringRefresh = false;
+    // The snapshot loads only the shared store (assumption 7).
     const loadAuthStore = () => {
       if (mutateDuringRefresh) {
         mutateDuringRefresh = false;
-        setRuntimeAuthProfileStoreSnapshot(newStore, agentDir);
+        setRuntimeAuthProfileStoreSnapshot(newStore);
         return oldStore;
       }
-      return getRuntimeAuthProfileStoreSnapshotCore(agentDir) ?? oldStore;
+      return getRuntimeAuthProfileStoreSnapshotCore() ?? oldStore;
     };
     const initial = await prepareSecretsRuntimeSnapshot({
       config: asConfig({
@@ -395,9 +398,7 @@ describe("secrets runtime fast path", () => {
     expect(
       getActiveSecretsRuntimeSnapshot()?.authStores[0]?.store.profiles["openai:default"],
     ).toMatchObject({ key: "sk-new" });
-    expect(
-      getRuntimeAuthProfileStoreSnapshotCore(agentDir)?.profiles["openai:default"],
-    ).toMatchObject({
+    expect(getRuntimeAuthProfileStoreSnapshotCore()?.profiles["openai:default"]).toMatchObject({
       key: "sk-new",
     });
   });

@@ -34,7 +34,6 @@ import { loadAdmittedAuthStores } from "./runtime-auth-store-admission.js";
 import type { DegradedSecretOwner } from "./runtime-degraded-state.js";
 import {
   canUseSecretsRuntimeFastPath,
-  collectCandidateAgentDirs,
   createEmptyRuntimeWebToolsMetadata,
   mergeSecretsRuntimeEnv,
   resolveRefreshAgentDirs,
@@ -145,25 +144,17 @@ export async function prepareSecretsRuntimeSnapshot(params: {
   const includeAuthStoreRefs = params.includeAuthStoreRefs ?? true;
   let authStores: Array<{ agentDir: string; store: AuthProfileStore }> = [];
   const fastPathLoadAuthStore = params.loadAuthStore ?? loadAuthProfileStoreWithoutExternalProfiles;
-  const candidateDirs = params.agentDirs?.length
-    ? uniqueStrings(params.agentDirs.map((entry) => resolveUserPath(entry, runtimeEnv)))
-    : collectCandidateAgentDirs(resolvedConfig, runtimeEnv);
+  const candidateDirs = uniqueStrings(
+    (params.agentDirs ?? []).map((entry) => resolveUserPath(entry, runtimeEnv)),
+  );
   const explicitAgentDirs =
     params.explicitAgentDirs !== undefined
       ? params.explicitAgentDirs && [...params.explicitAgentDirs]
       : params.agentDirs?.length
         ? [...candidateDirs]
         : null;
-  let migrationDegradedOwners: DegradedSecretOwner[] = [];
   if (includeAuthStoreRefs) {
-    const loaded = loadAdmittedAuthStores({
-      agentDirs: candidateDirs,
-      env: runtimeEnv,
-      loadAuthStore: fastPathLoadAuthStore,
-      allowUnavailable: params.allowUnavailableSecretOwners === true,
-    });
-    authStores = loaded.authStores;
-    migrationDegradedOwners = loaded.degradedOwners;
+    authStores = loadAdmittedAuthStores(fastPathLoadAuthStore);
   }
   if (
     canUseSecretsRuntimeFastPath({
@@ -180,7 +171,7 @@ export async function prepareSecretsRuntimeSnapshot(params: {
       authStoreCredentialsRevision,
       authStoreSnapshotsRevision,
       warnings: [],
-      degradedOwners: migrationDegradedOwners,
+      degradedOwners: [],
       secretOwners: [],
       webTools: createEmptyRuntimeWebToolsMetadata(),
     };
@@ -234,14 +225,7 @@ export async function prepareSecretsRuntimeSnapshot(params: {
   if (includeAuthStoreRefs) {
     const loadAuthStore = params.loadAuthStore ?? loadAuthProfileStoreForSecretsRuntime;
     if (!params.loadAuthStore) {
-      const loaded = loadAdmittedAuthStores({
-        agentDirs: candidateDirs,
-        env: runtimeEnv,
-        loadAuthStore,
-        allowUnavailable: params.allowUnavailableSecretOwners === true,
-      });
-      authStores = loaded.authStores;
-      migrationDegradedOwners = loaded.degradedOwners;
+      authStores = loadAdmittedAuthStores(loadAuthStore);
     }
     for (const entry of authStores) {
       collectAuthStoreAssignments({
@@ -299,11 +283,7 @@ export async function prepareSecretsRuntimeSnapshot(params: {
     authStoreCredentialsRevision,
     authStoreSnapshotsRevision,
     warnings: context.warnings,
-    degradedOwners: [
-      ...migrationDegradedOwners,
-      ...assignmentResolution.degradedOwners,
-      ...webTools.degradedOwners,
-    ],
+    degradedOwners: [...assignmentResolution.degradedOwners, ...webTools.degradedOwners],
     secretOwners: [...assignmentSecretOwners, ...webTools.secretOwners],
     webTools: webTools.metadata,
   };
@@ -400,7 +380,7 @@ async function prepareActiveSecretsRuntimeRefresh(
       config: sourceConfig,
       assignmentConfig: snapshotConfig,
       env: activeRefreshContext.env,
-      agentDirs: resolveRefreshAgentDirs(sourceConfig, activeRefreshContext),
+      agentDirs: resolveRefreshAgentDirs(activeRefreshContext),
       explicitAgentDirs: activeRefreshContext.explicitAgentDirs,
       includeConfigRefs: activeRefreshContext.includeConfigRefs ?? true,
       includeAuthStoreRefs: includeAuthStoreRefs ?? activeRefreshContext.includeAuthStoreRefs,

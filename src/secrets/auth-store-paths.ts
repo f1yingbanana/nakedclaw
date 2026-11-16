@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { listAgentIds, resolveAgentDir } from "../agents/agent-scope.js";
 import { resolveSharedAuthStorePath } from "../agents/auth-profiles/path-resolve.js";
-import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
+import { resolveAuthProfileStorePath } from "../agents/auth-profiles/sqlite.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveUserPath } from "../utils.js";
 
@@ -37,6 +37,8 @@ export function listAuthProfileStoreTargets(
     stateDir,
   });
 
+  // NakedClaw: an agent's target is the store holding its credentials, so every
+  // agent but a scoped run's collapses into the shared target (assumption 7).
   const agentsRoot = path.join(resolveUserPath(stateDir, scopedEnv), "agents");
   if (fs.existsSync(agentsRoot)) {
     for (const entry of fs.readdirSync(agentsRoot, { withFileTypes: true })) {
@@ -44,14 +46,18 @@ export function listAuthProfileStoreTargets(
         continue;
       }
       const agentDir = path.join(agentsRoot, entry.name, "agent");
-      addTarget({ kind: "agent", agentDir, path: resolveAuthProfileDatabasePath(agentDir) });
+      addTarget({
+        kind: "agent",
+        agentDir,
+        path: resolveAuthProfileStorePath(agentDir, scopedEnv),
+      });
     }
   }
 
   // Configured agent dirs may live outside stateDir; include them after state-dir discovery.
   for (const agentId of listAgentIds(config)) {
     const agentDir = resolveUserPath(resolveAgentDir(config, agentId, scopedEnv), scopedEnv);
-    addTarget({ kind: "agent", agentDir, path: resolveAuthProfileDatabasePath(agentDir) });
+    addTarget({ kind: "agent", agentDir, path: resolveAuthProfileStorePath(agentDir, scopedEnv) });
   }
 
   return [...targets.values()];

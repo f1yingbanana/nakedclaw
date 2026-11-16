@@ -7,11 +7,13 @@ import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { withEnv } from "../../test-utils/env.js";
 import { cleanupSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
+import { resolveSharedAuthStorePath } from "./path-resolve.js";
 import { resolveAuthStatePathForDisplay, resolveAuthStorePathForDisplay } from "./paths.js";
 import {
   clearRuntimeAuthProfileStoreSnapshots,
   setRuntimeAuthProfileStoreSnapshot,
 } from "./runtime-snapshots.js";
+import { resolveSharedMainAuthAgentDir } from "./shared-main-dir.js";
 import { hasLocalAuthProfileStoreSource } from "./source-check.js";
 import {
   inspectPersistedAuthProfileStoreRaw,
@@ -45,10 +47,10 @@ describe("shared auth store path resolution", () => {
     closeOpenClawStateDatabaseForTest();
   });
 
-  it("keeps the absent ownership record pinned to the shipped legacy-main path", async () => {
+  it("keeps the absent ownership record pinned to the shipped legacy-main path", () => {
     const env = makeStateEnv();
-    const { resolveSharedAuthStorePath } = await import("./path-resolve.js");
-    const { resolveSharedMainAuthAgentDir } = await import("./shared-main-dir.js");
+    // NakedClaw: the store writes use is the shared one (assumption 7), so pin the
+    // ownership the store itself resolves, not a fresh module's copy.
     const legacyDir = resolveSharedMainAuthAgentDir(env);
 
     expect(resolveSharedAuthStorePath(env)).toBe(path.join(legacyDir, "openclaw-agent.sqlite"));
@@ -81,7 +83,7 @@ describe("shared auth store path resolution", () => {
     const {
       reloadSharedAuthStoreOwnership,
       resolveSharedAuthStoreOwnership,
-      resolveSharedAuthStorePath,
+      resolveSharedAuthStorePath: resolveFreshSharedAuthStorePath,
     } = await import("./path-resolve.js");
 
     expect(resolveSharedAuthStoreOwnership(env)).toEqual({ location: "legacy-main" });
@@ -89,17 +91,19 @@ describe("shared auth store path resolution", () => {
     expect(resolveSharedAuthStoreOwnership(env)).toEqual({ location: "legacy-main" });
 
     expect(reloadSharedAuthStoreOwnership(env)).toEqual({ location: "state-db" });
-    expect(resolveSharedAuthStorePath(env)).toBe(resolveOpenClawStateSqlitePath(env));
+    expect(resolveFreshSharedAuthStorePath(env)).toBe(resolveOpenClawStateSqlitePath(env));
   });
 
   it("resolves the relocated store to the canonical shared state database", async () => {
     const env = makeStateEnv();
     writeConfigMachineState("auth.sharedStore", { location: "state-db" }, { env });
-    const { resolveSharedAuthStoreOwnership, resolveSharedAuthStorePath } =
-      await import("./path-resolve.js");
+    const {
+      resolveSharedAuthStoreOwnership,
+      resolveSharedAuthStorePath: resolveFreshSharedAuthStorePath,
+    } = await import("./path-resolve.js");
 
     expect(resolveSharedAuthStoreOwnership(env)).toEqual({ location: "state-db" });
-    expect(resolveSharedAuthStorePath(env)).toBe(resolveOpenClawStateSqlitePath(env));
+    expect(resolveFreshSharedAuthStorePath(env)).toBe(resolveOpenClawStateSqlitePath(env));
 
     withEnv({ OPENCLAW_STATE_DIR: env.OPENCLAW_STATE_DIR, OPENCLAW_AGENT_DIR: undefined }, () => {
       writePersistedAuthProfileStoreRaw(persistedStore);
@@ -111,19 +115,8 @@ describe("shared auth store path resolution", () => {
     });
   });
 
-  it("keeps an agent-local store local under shared-state ownership", async () => {
-    const env = makeStateEnv();
-    writeConfigMachineState("auth.sharedStore", { location: "state-db" }, { env });
-    const agentDir = path.join(env.OPENCLAW_STATE_DIR ?? "", "agents", "helper", "agent");
-
-    withEnv({ OPENCLAW_STATE_DIR: env.OPENCLAW_STATE_DIR, OPENCLAW_AGENT_DIR: undefined }, () => {
-      writePersistedAuthProfileStoreRaw(persistedStore, agentDir);
-      const expectedPath = path.join(agentDir, "openclaw-agent.sqlite");
-      expect(resolveAuthStorePathForDisplay(agentDir)).toBe(expectedPath);
-      expect(resolveAuthStatePathForDisplay(agentDir)).toBe(expectedPath);
-      expect(existsSync(expectedPath)).toBe(true);
-    });
-  });
+  // NakedClaw: removed the test of an agent-local store kept local; agents have no
+  // stores of their own (assumption 7).
 
   it("ignores runtime-only external CLI profiles when displaying store ownership", async () => {
     const env = makeStateEnv();
@@ -142,7 +135,8 @@ describe("shared auth store path resolution", () => {
       );
 
       expect(hasLocalAuthProfileStoreSource(agentDir)).toBe(true);
-      expect(inspectPersistedAuthProfileStoreRaw(agentDir).status).toBe("missing");
+      // NakedClaw: the agent reads the shared store's persisted rows (assumption 7).
+      expect(inspectPersistedAuthProfileStoreRaw(agentDir).status).toBe("readable");
       expect(resolveAuthStorePathForDisplay(agentDir)).toBe(resolveOpenClawStateSqlitePath(env));
       expect(resolveAuthStatePathForDisplay(agentDir)).toBe(resolveOpenClawStateSqlitePath(env));
     });

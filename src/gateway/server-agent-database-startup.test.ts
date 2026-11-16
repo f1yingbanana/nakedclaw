@@ -10,7 +10,6 @@ import { saveAuthProfileStore } from "../agents/auth-profiles.js";
 import { listConfiguredOwnerInputs } from "../agents/prepared-model-runtime.configured.js";
 import {
   getPreparedModelRuntimeSnapshot,
-  markPreparedModelRuntimeSnapshotsStale,
   refreshPreparedModelRuntimeSnapshots,
 } from "../agents/prepared-model-runtime.js";
 import { getRuntimeConfig } from "../config/io.js";
@@ -165,7 +164,6 @@ it.for([
   { outcome: "recover", agentId: "main" },
   { outcome: "corrupt", agentId: "main" },
   { outcome: "startup-failure", agentId: "worker" },
-  { outcome: "superseded", agentId: "worker" },
   { outcome: "shutdown-preparation", agentId: "worker" },
   { outcome: "handoff", agentId: "main" },
 ] as const)(
@@ -236,7 +234,8 @@ it.for([
             },
           },
         },
-        path.dirname(database.path),
+        // NakedClaw: credentials live only in the shared store (assumption 7).
+        undefined,
       );
     }
     if (outcome !== "fast") {
@@ -338,7 +337,7 @@ it.for([
       }
       return broker;
     });
-    if (outcome === "recover" || outcome === "superseded") {
+    if (outcome === "recover") {
       const session = await import("./server-startup-session-migration.js");
       const migrate = session.runGatewaySessionStartupMaintenance;
       vi.spyOn(session, "runGatewaySessionStartupMaintenance").mockImplementation(
@@ -354,20 +353,6 @@ it.for([
             sessionPrepared = true;
             preparationEntered.resolve();
             await preparationRelease.promise;
-          }
-        },
-      );
-    }
-    if (outcome === "superseded") {
-      const model = await import("../agents/prepared-model-runtime.js");
-      const refresh = model.refreshPreparedModelRuntimeSnapshots;
-      vi.spyOn(model, "refreshPreparedModelRuntimeSnapshots").mockImplementation(
-        async (config, options) => {
-          await refresh(config, options);
-          if (options?.agentIds?.has(agentId)) {
-            markPreparedModelRuntimeSnapshotsStale("same-config publication superseded", {
-              agentIds: new Set([agentId]),
-            });
           }
         },
       );
@@ -549,7 +534,7 @@ it.for([
         expect(fs.readFileSync(pause!.preparationReleasePath, "utf8")).toBe("owner cancelled");
         expect(inspectionAlive(preparationEnteredPath)).toBe(false);
         expect(fs.readFileSync(agentPath)).toEqual(agentBytes);
-      } else if (outcome === "recover" || outcome === "superseded") {
+      } else if (outcome === "recover") {
         fs.writeFileSync(releasePath, "resume");
         await withinTest(
           Promise.race([
@@ -601,17 +586,6 @@ it.for([
           );
         }
         preparationRelease.resolve();
-        if (outcome === "superseded") {
-          await vi.waitFor(
-            () =>
-              expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toMatchObject({
-                code: "agent-database-inspection-failed",
-                reason: expect.stringContaining("model preparation has not published"),
-              }),
-            { timeout: 10000 },
-          );
-          return;
-        }
         await vi.waitFor(
           () => expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toBeUndefined(),
           { timeout: 10000 },
@@ -633,11 +607,14 @@ it.for([
         });
         expect(getRuntimeConfigSourceSnapshot()).toEqual(recoverySource);
         const snapshot = getActiveSecretsRuntimeSnapshot();
-        expect(
-          snapshot?.authStores.find((entry) => entry.databasePath === agentPath)?.store.profiles[
-            "anthropic:startup-recovery"
-          ],
-        ).toMatchObject({ key: recoverySecret });
+        // NakedClaw: the snapshot holds only the shared store (assumption 7).
+        expect(snapshot?.authStores).toHaveLength(1);
+        expect(snapshot?.authStores[0]?.databasePath).not.toBe(agentPath);
+        expect(snapshot?.authStores[0]?.store.profiles["anthropic:startup-recovery"]).toMatchObject(
+          {
+            key: recoverySecret,
+          },
+        );
         expect(snapshot?.degradedOwners?.some((owner) => owner.paths.includes(agentPath))).toBe(
           false,
         );

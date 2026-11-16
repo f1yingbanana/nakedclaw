@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, it, vi } from "vitest";
 import { loadSessionEntryForAdmission } from "../../config/sessions/session-accessor.sqlite-entry-admission.js";
@@ -12,7 +13,10 @@ import {
   withOpenClawTestState,
   type OpenClawTestState,
 } from "../../test-utils/openclaw-test-state.js";
-import { noteCommittedSharedAuthStoreOwnership } from "./path-resolve.js";
+import {
+  noteCommittedSharedAuthStoreOwnership,
+  resolveSharedAuthStorePath,
+} from "./path-resolve.js";
 import { hasAnyAuthProfileStoreSourceAsync } from "./source-check.js";
 import { SHARED_AUTH_STORE_STATE_KEY, writeAuthProfileJsonCell } from "./sqlite-json.js";
 import * as readers from "./sqlite-read.js";
@@ -63,8 +67,10 @@ it("retains the read failure classification when reader cleanup also fails", asy
 it("detects an existing auth source without caller-thread SQLite", async () => {
   await withOpenClawTestState({ label: "auth-source-boundary" }, async (state) => {
     const agentDir = state.agentDir("source");
-    fs.mkdirSync(agentDir, { recursive: true });
-    const database = new DatabaseSync(resolveAuthProfileDatabasePath(agentDir));
+    // NakedClaw: an agent's source is the shared store (assumption 7).
+    const databasePath = resolveSharedAuthStorePath(state.env);
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+    const database = new DatabaseSync(databasePath);
     database.exec(`
       CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT);
       INSERT INTO auth_profile_store VALUES ('primary', '{"version":1,"profiles":{}}');
@@ -191,10 +197,12 @@ it("preserves absent, table-missing, state-only, and unreadable source routing",
       },
       { name: "unreadable-database", bytes: "not a SQLite database", expected: true },
     ];
+    // NakedClaw: each agent's source is the shared store (assumption 7).
+    const databasePath = resolveSharedAuthStorePath(state.env);
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
     for (const fixture of cases) {
       const agentDir = state.agentDir(fixture.name);
-      fs.mkdirSync(agentDir, { recursive: true });
-      const databasePath = resolveAuthProfileDatabasePath(agentDir);
+      fs.rmSync(databasePath, { force: true });
       if (fixture.sql) {
         const database = new DatabaseSync(databasePath);
         database.exec(fixture.sql);

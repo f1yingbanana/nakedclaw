@@ -5,7 +5,11 @@ import { isSameOpenClawAgentDatabasePath } from "../../state/openclaw-agent-db.p
 import { resolveSharedAuthStoreOwnership, resolveSharedAuthStorePath } from "./path-resolve.js";
 import { mergeAuthProfileStores } from "./persisted.js";
 import { getRuntimeAuthProfileStoreSnapshotAtDatabasePath } from "./runtime-snapshots.js";
-import { resolveAuthProfileDatabaseOwnerId, resolveAuthProfileDatabasePath } from "./sqlite.js";
+import {
+  resolveAuthProfileDatabaseOwnerId,
+  resolveAuthProfileDatabasePath,
+  resolveAuthProfileStorePath,
+} from "./sqlite.js";
 import { AuthProfileStoreUnreadableError } from "./store-unreadable-error.js";
 import type { AuthProfileStore } from "./types.js";
 
@@ -60,10 +64,10 @@ export function* readRuntimeAuthProfileStoreFromSnapshots(
   params: RuntimeAuthSnapshotReadScope,
 ): Generator<{ agentDir?: string }, AuthProfileStore | null, Result<AuthProfileStore, unknown>> {
   const mainKey = params.inheritedAuthDir
-    ? resolveAuthProfileDatabasePath(params.inheritedAuthDir)
+    ? resolveAuthProfileStorePath(params.inheritedAuthDir, params.env)
     : (params.sharedPath ?? resolveSharedAuthStorePath(params.env));
   const requestedKey = params.agentDir
-    ? resolveAuthProfileDatabasePath(params.agentDir)
+    ? resolveAuthProfileStorePath(params.agentDir, params.env)
     : (params.sharedPath ?? resolveSharedAuthStorePath(params.env));
   const mainStore = getRuntimeAuthProfileStoreSnapshotAtDatabasePath(mainKey);
   if (!params.agentDir || requestedKey === mainKey) {

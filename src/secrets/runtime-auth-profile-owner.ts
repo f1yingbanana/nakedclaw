@@ -1,17 +1,16 @@
 /** Stable SecretRef owner identity for one agent-scoped auth profile. */
-import { resolveSharedAuthStorePath } from "../agents/auth-profiles/path-resolve.js";
-import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
+import { resolveAuthProfileStorePath } from "../agents/auth-profiles/sqlite.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 
-/** Tuple encoding distinguishes agents and avoids path/profile separator collisions. */
+/**
+ * Tuple encoding distinguishes stores and avoids path/profile separator collisions.
+ * NakedClaw: keyed by the store that holds the profile (assumption 7).
+ */
 export function resolveAuthProfileSecretOwnerId(params: {
   agentDir?: string;
   profileId: string;
 }): string {
-  const storePath = params.agentDir
-    ? resolveAuthProfileDatabasePath(params.agentDir)
-    : resolveSharedAuthStorePath();
-  return JSON.stringify([storePath, params.profileId]);
+  return JSON.stringify([resolveAuthProfileStorePath(params.agentDir), params.profileId]);
 }
 
 /** Enumerates the same store-scoped identities used by assignment and refresh ownership. */

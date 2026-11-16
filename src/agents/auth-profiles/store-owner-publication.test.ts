@@ -22,14 +22,17 @@ import {
   getRuntimeAuthProfileStoreStateMutationToken,
 } from "./mutation-lineage.js";
 import { createOAuthRefreshFence } from "./oauth-refresh-marker.js";
-import { loadPersistedAuthProfileStore, loadPersistedSharedAuthProfileStore } from "./persisted.js";
+import { loadPersistedSharedAuthProfileStore } from "./persisted.js";
+import { authProfileRuntimeMode } from "./runtime-scope.js";
 import {
   clearRuntimeAuthProfileStoreSnapshots,
   replaceRuntimeAuthProfileStoreSnapshots,
   setRuntimeAuthProfileStoreSnapshot,
+  setRuntimeAuthProfileStoreSnapshotAtDatabasePath,
 } from "./runtime-snapshots.js";
 import {
   resolveAuthProfileDatabasePath,
+  resolveAuthProfileStorePath,
   runAuthProfileWriteTransaction,
   writePersistedAuthProfileStoreRaw,
 } from "./sqlite.js";
@@ -55,7 +58,7 @@ const { tempDirs, saveOptions, apiKey, store, snapshotAt, unreadableOuter, seedR
 
 describe("auth publication owner receipts", () => {
   it.each(["cold", "cached", "activated", "admitted"] as const)(
-    "observes exact shared and local credential owners through a %s read",
+    "observes the exact shared credential owner through a %s read",
     async (mode) => {
       const owner = await seedRoot("observed");
       if (mode === "cold") {
@@ -105,80 +108,39 @@ describe("auth publication owner receipts", () => {
           },
         ),
       );
+      // NakedClaw: the agent's login landed in the shared store; its own database
+      // owns no credentials (assumption 7).
       expect(observations).toEqual(
         expect.arrayContaining([
-          { databasePath: owner.sharedPath, profiles: { shared: apiKey("observed") } },
-          { databasePath: owner.agentPath, profiles: { local: apiKey("observed-local") } },
+          {
+            databasePath: owner.sharedPath,
+            profiles: { shared: apiKey("observed"), local: apiKey("observed-local") },
+          },
         ]),
       );
-      expect(
-        observations.some(
-          (value) => value.databasePath === owner.agentPath && value.profiles.shared !== undefined,
-        ),
-      ).toBe(false);
+      expect(observations.some((value) => value.databasePath === owner.agentPath)).toBe(false);
     },
   );
 
-  it.each(["prepare", "activate"] as const)(
-    "requires a recorded migration diagnosis discovered at %s before empty-owner activation",
-    async (discoveredAt) => {
-      const { prepareSecretsRuntimeSnapshot } = await import("../../secrets/runtime.js");
-      const first = await seedRoot("first");
-      const second = await seedRoot("second");
-      const agentDir = tempDirs.make("openclaw-auth-owner-empty-activation-");
-      await updateAuthProfileStoreWithLock({
-        stateDir: first.stateDir,
-        saveOptions,
-        updater: (current) => {
-          current.profiles = {};
-          return true;
-        },
-      });
-      withEnv(second.env, () =>
-        setRuntimeAuthProfileStoreSnapshot(
-          loadAuthProfileStoreWithoutExternalProfiles(agentDir),
-          agentDir,
-        ),
-      );
-      const legacyPath = path.join(agentDir, "auth.json");
-      if (discoveredAt === "prepare") {
-        fs.writeFileSync(legacyPath, "{}");
-      }
-      const snapshot = await prepareSecretsRuntimeSnapshot({
-        config: {},
-        env: first.env,
-        agentDirs: [agentDir],
-        allowUnavailableSecretOwners: true,
-        loadAuthStore: () =>
-          withEnv(first.env, () => loadAuthProfileStoreWithoutExternalProfiles(agentDir)),
-      });
-      expect(snapshot.authStores[0]?.store.profiles).toEqual({});
-      const activate = () =>
-        activateSecretsRuntimeSnapshotState({
-          snapshot,
-          refreshContext: null,
-          refreshHandler: null,
-        });
-      if (discoveredAt === "prepare") {
-        expect(snapshot.degradedOwners).toHaveLength(1);
-        expect(activate).not.toThrow();
-        expect(snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.profiles).toEqual({});
-      } else {
-        expect(snapshot.degradedOwners).toEqual([]);
-        fs.writeFileSync(legacyPath, "{}");
-        expect(activate).toThrow("requires legacy credential migration");
-        expect(snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.profiles.shared).toEqual(
-          apiKey("second"),
-        );
-      }
-    },
-  );
+  // NakedClaw: removed the tests of an agent's own legacy auth.json found before an
+  // empty agent store activates; agent files are ignored (assumption 7).
 
   it.each(["update", "capture"] as const)(
     "honors an explicit state root over the enclosing scope during %s",
     async (operation) => {
       const first = await seedRoot("first");
       const second = await seedRoot("second");
+      // NakedClaw: only the scoped run's agent directory has a snapshot of its own (assumption 7).
+      setRuntimeAuthProfileStoreSnapshotAtDatabasePath(
+        snapshotAt(first.sharedPath)!,
+        first.agentPath,
+        first.agentDir,
+        {
+          databasePath: first.agentPath,
+          sharedDatabasePath: first.sharedPath,
+          location: "state-db",
+        },
+      );
       await withAuthProfileStoreAgentDir(first.agentDir, second.stateDir, async () => {
         if (operation === "update") {
           await updateAuthProfileStoreWithLock({
@@ -207,158 +169,130 @@ describe("auth publication owner receipts", () => {
         local: apiKey("updated-local"),
         shared: apiKey("first"),
       });
-      expect(snapshotAt(second.agentPath)?.profiles.shared).toEqual(apiKey("second"));
+      expect(snapshotAt(second.sharedPath)?.profiles.shared).toEqual(apiKey("second"));
     },
   );
 
-  it("retains inherited persisted provenance after an ordinary local rebuild", async () => {
+  // NakedClaw: removed the test of inherited provenance after a local rebuild; agent
+  // stores no longer inherit (assumption 7).
+
+  // NakedClaw: no agent-local case; agents have no stores of their own (assumption 7).
+  it("keeps runtime-only rows out of unrelated shared batch persistence", async () => {
     const root = await seedRoot("original");
-    withEnv(root.env, () =>
-      saveAuthProfileStore(
-        { version: 1, profiles: { local: apiKey("updated-local") } },
+    const agentDir = undefined;
+    const databasePath = root.sharedPath;
+    const durableProfileId = "shared";
+    const durableCredential = apiKey("original");
+    const staleProfileId = "openai:removed";
+    const staleFenceId = "openai:stale-fence";
+    const externalProfileId = "anthropic:runtime-external";
+    const expiredOAuth = {
+      type: "oauth",
+      provider: "openai",
+      access: "expired-access",
+      refresh: "consumed-refresh",
+      expires: Date.now() - 60_000,
+    } satisfies AuthProfileCredential;
+    const staleFence = createOAuthRefreshFence({
+      profileId: staleFenceId,
+      credential: expiredOAuth,
+    });
+
+    withEnv(root.env, () => {
+      writePersistedAuthProfileStoreRaw(
+        {
+          version: 1,
+          profiles: {
+            [durableProfileId]: durableCredential,
+            [staleProfileId]: apiKey("removed"),
+            [staleFenceId]: staleFence,
+          },
+        },
+        agentDir,
+      );
+      setRuntimeAuthProfileStoreSnapshot(
+        loadAuthProfileStoreWithoutExternalProfiles(agentDir),
+        agentDir,
+      );
+      writePersistedAuthProfileStoreRaw(
+        { version: 1, profiles: { [durableProfileId]: durableCredential } },
+        agentDir,
+      );
+
+      const runtimeStore = snapshotAt(databasePath);
+      if (!runtimeStore) {
+        throw new Error("missing runtime auth profile snapshot");
+      }
+      setRuntimeAuthProfileStoreSnapshot(
+        {
+          ...runtimeStore,
+          profiles: {
+            ...runtimeStore.profiles,
+            [externalProfileId]: {
+              type: "oauth",
+              provider: "anthropic",
+              access: "external-access",
+              refresh: "external-refresh",
+              expires: Date.now() + 60_000,
+            },
+          },
+          runtimeExternalProfileIds: [externalProfileId],
+        },
+        agentDir,
+      );
+    });
+
+    await persistAuthProfileBatch({
+      stateDir: root.stateDir,
+      agentDir,
+      profiles: [{ profileId: "openai:unrelated", credential: apiKey("unrelated") }],
+    });
+
+    const persisted = loadPersistedSharedAuthProfileStore(root.env);
+    expect(persisted?.profiles).toEqual({
+      [durableProfileId]: durableCredential,
+      "openai:unrelated": apiKey("unrelated"),
+    });
+    expect(snapshotAt(databasePath)?.profiles).toMatchObject({
+      [durableProfileId]: durableCredential,
+      "openai:unrelated": apiKey("unrelated"),
+      [externalProfileId]: {
+        access: "external-access",
+        refresh: "external-refresh",
+      },
+    });
+    expect(snapshotAt(databasePath)?.profiles[staleProfileId]).toBeUndefined();
+    expect(snapshotAt(databasePath)?.profiles[staleFenceId]).toBeUndefined();
+  });
+
+  // NakedClaw: no unreadable local store case; agents have no stores of their own
+  // (assumption 7).
+  // NakedClaw: an empty shared store saved beside a legacy oauth.json no longer
+  // records a migration refusal (that was found while rebuilding agent snapshots);
+  // only Doctor imports older credentials (assumptions 6 and 7).
+  it("validates committed shared migration facts for a populated store", async () => {
+    const root = await seedRoot("original");
+    const oauthDir = tempDirs.make("openclaw-auth-owner-late-oauth-");
+    const env = { ...root.env, OPENCLAW_OAUTH_DIR: oauthDir };
+    withEnv(env, () =>
+      setRuntimeAuthProfileStoreSnapshot(
+        loadAuthProfileStoreWithoutExternalProfiles(root.agentDir),
         root.agentDir,
+      ),
+    );
+    const legacyPath = path.join(oauthDir, "oauth.json");
+    fs.writeFileSync(legacyPath, "{}");
+    withEnv(env, () =>
+      saveAuthProfileStore(
+        { version: 1, profiles: { shared: apiKey("updated") } },
+        undefined,
         saveOptions,
       ),
     );
-    expect(snapshotAt(root.agentPath)?.runtimePersistedProfileIds).toEqual(["local", "shared"]);
+    fs.unlinkSync(legacyPath);
+    expect(() => assertAuthProfileMigrationReady(undefined, env)).not.toThrow();
+    expect(snapshotAt(root.sharedPath)?.profiles.shared).toEqual(apiKey("updated"));
   });
-
-  it.each(["shared", "agent-local"] as const)(
-    "keeps runtime-only rows out of unrelated %s batch persistence",
-    async (scope) => {
-      const root = await seedRoot("original");
-      const agentDir = scope === "agent-local" ? root.agentDir : undefined;
-      const databasePath = scope === "agent-local" ? root.agentPath : root.sharedPath;
-      const durableProfileId = scope === "agent-local" ? "local" : "shared";
-      const durableCredential = apiKey(scope === "agent-local" ? "original-local" : "original");
-      const staleProfileId = "openai:removed";
-      const staleFenceId = "openai:stale-fence";
-      const externalProfileId = "anthropic:runtime-external";
-      const expiredOAuth = {
-        type: "oauth",
-        provider: "openai",
-        access: "expired-access",
-        refresh: "consumed-refresh",
-        expires: Date.now() - 60_000,
-      } satisfies AuthProfileCredential;
-      const staleFence = createOAuthRefreshFence({
-        profileId: staleFenceId,
-        credential: expiredOAuth,
-      });
-
-      withEnv(root.env, () => {
-        writePersistedAuthProfileStoreRaw(
-          {
-            version: 1,
-            profiles: {
-              [durableProfileId]: durableCredential,
-              [staleProfileId]: apiKey("removed"),
-              [staleFenceId]: staleFence,
-            },
-          },
-          agentDir,
-        );
-        setRuntimeAuthProfileStoreSnapshot(
-          loadAuthProfileStoreWithoutExternalProfiles(agentDir),
-          agentDir,
-        );
-        writePersistedAuthProfileStoreRaw(
-          { version: 1, profiles: { [durableProfileId]: durableCredential } },
-          agentDir,
-        );
-
-        const runtimeStore = snapshotAt(databasePath);
-        if (!runtimeStore) {
-          throw new Error("missing runtime auth profile snapshot");
-        }
-        setRuntimeAuthProfileStoreSnapshot(
-          {
-            ...runtimeStore,
-            profiles: {
-              ...runtimeStore.profiles,
-              [externalProfileId]: {
-                type: "oauth",
-                provider: "anthropic",
-                access: "external-access",
-                refresh: "external-refresh",
-                expires: Date.now() + 60_000,
-              },
-            },
-            runtimeExternalProfileIds: [externalProfileId],
-          },
-          agentDir,
-        );
-      });
-
-      await persistAuthProfileBatch({
-        stateDir: root.stateDir,
-        agentDir,
-        profiles: [{ profileId: "openai:unrelated", credential: apiKey("unrelated") }],
-      });
-
-      const persisted =
-        scope === "agent-local"
-          ? loadPersistedAuthProfileStore(root.agentDir)
-          : loadPersistedSharedAuthProfileStore(root.env);
-      expect(persisted?.profiles).toEqual({
-        [durableProfileId]: durableCredential,
-        "openai:unrelated": apiKey("unrelated"),
-      });
-      expect(snapshotAt(databasePath)?.profiles).toMatchObject({
-        [durableProfileId]: durableCredential,
-        "openai:unrelated": apiKey("unrelated"),
-        [externalProfileId]: {
-          access: "external-access",
-          refresh: "external-refresh",
-        },
-      });
-      expect(snapshotAt(databasePath)?.profiles[staleProfileId]).toBeUndefined();
-      expect(snapshotAt(databasePath)?.profiles[staleFenceId]).toBeUndefined();
-    },
-  );
-
-  it.each([
-    { unreadableLocal: false, populated: false },
-    { unreadableLocal: true, populated: false },
-    { unreadableLocal: false, populated: true },
-    { unreadableLocal: true, populated: true },
-  ])(
-    "validates committed shared migration facts with unreadableLocal=$unreadableLocal populated=$populated",
-    async ({ unreadableLocal, populated }) => {
-      const root = await seedRoot("original");
-      const oauthDir = tempDirs.make("openclaw-auth-owner-late-oauth-");
-      const env = { ...root.env, OPENCLAW_OAUTH_DIR: oauthDir };
-      withEnv(env, () =>
-        setRuntimeAuthProfileStoreSnapshot(
-          loadAuthProfileStoreWithoutExternalProfiles(root.agentDir),
-          root.agentDir,
-        ),
-      );
-      if (unreadableLocal) {
-        writePersistedAuthProfileStoreRaw({ version: 1, profiles: "invalid" }, root.agentDir);
-      }
-      const legacyPath = path.join(oauthDir, "oauth.json");
-      fs.writeFileSync(legacyPath, "{}");
-      withEnv(env, () =>
-        saveAuthProfileStore(
-          { version: 1, profiles: populated ? { shared: apiKey("updated") } : {} },
-          undefined,
-          saveOptions,
-        ),
-      );
-      fs.unlinkSync(legacyPath);
-      // The removed file cannot make this assertion discover the refusal itself.
-      if (populated) {
-        expect(() => assertAuthProfileMigrationReady(undefined, env)).not.toThrow();
-        expect(snapshotAt(root.agentPath)?.profiles.shared).toEqual(apiKey("updated"));
-      } else {
-        expect(() => assertAuthProfileMigrationReady(undefined, env)).toThrow(
-          "requires legacy credential migration",
-        );
-        expect(snapshotAt(root.agentPath)).toBeUndefined();
-      }
-    },
-  );
 
   it.each(["credentials", "state"] as const)(
     "records committed %s changes and evicts derived snapshots when migration refuses publication",
@@ -394,9 +328,9 @@ describe("auth publication owner receipts", () => {
         ),
       );
       expect(loadPersistedSharedAuthProfileStore(first.env)).toMatchObject(next);
-      expect(snapshotAt(first.agentPath)).toBeUndefined();
+      expect(snapshotAt(first.sharedPath)).toBeUndefined();
       expect(withEnv(first.env, () => readToken().revision)).toBeGreaterThan(before);
-      expect(snapshotAt(second.agentPath)?.profiles.shared).toEqual(apiKey("second"));
+      expect(snapshotAt(second.sharedPath)?.profiles.shared).toEqual(apiKey("second"));
       expect(() => assertAuthProfileMigrationReady(undefined, first.env)).toThrow(
         "requires legacy credential migration",
       );
@@ -429,23 +363,12 @@ describe("auth publication owner receipts", () => {
     );
   });
 
-  it.each([
-    { refusedOwner: "child", newer: false, stateOnly: false },
-    { refusedOwner: "child", newer: true, stateOnly: false },
-    { refusedOwner: "shared", newer: false, stateOnly: false },
-    { refusedOwner: "shared", newer: false, stateOnly: true },
-  ])(
-    "isolates $refusedOwner rollback refusal with newer=$newer stateOnly=$stateOnly",
-    async ({ refusedOwner, newer, stateOnly }) => {
+  // NakedClaw: an agent's migration refusal is the shared store's (assumption 7);
+  // the cases isolating a child's refusal from the shared store are gone.
+  it.each([{ stateOnly: false }, { stateOnly: true }])(
+    "isolates a shared rollback refusal with stateOnly=$stateOnly",
+    async ({ stateOnly }) => {
       const root = await seedRoot("original");
-      const healthyAgentDir = tempDirs.make("openclaw-auth-owner-healthy-sibling-");
-      const healthyPath = resolveAuthProfileDatabasePath(healthyAgentDir);
-      withEnv(root.env, () =>
-        setRuntimeAuthProfileStoreSnapshot(
-          loadAuthProfileStoreWithoutExternalProfiles(healthyAgentDir),
-          healthyAgentDir,
-        ),
-      );
       const unrelated = await seedRoot("unrelated");
       const baseline = captureAuthProfileStorePersistenceSnapshot(undefined, { env: root.env });
       const committed = saveAuthProfileStoreIfPersistenceSnapshotMatches({
@@ -456,93 +379,26 @@ describe("auth publication owner receipts", () => {
         options: saveOptions,
       });
       expect(committed.publishRuntimeSnapshots()).toBe(true);
-      if (newer) {
-        const current = snapshotAt(root.agentPath);
-        if (!current) {
-          throw new Error("missing child runtime snapshot");
-        }
-        current.usageStats = { shared: { lastUsed: 123 } };
-        withEnv(root.env, () => setRuntimeAuthProfileStoreSnapshot(current, root.agentDir));
-      }
-      const refusedDir = refusedOwner === "child" ? root.agentDir : undefined;
       markAuthProfileMigrationRequired(
-        refusedDir,
-        new AuthProfileMigrationRequiredError({ agentDir: refusedDir, env: root.env, sources: [] }),
+        undefined,
+        new AuthProfileMigrationRequiredError({ env: root.env, sources: [] }),
         root.env,
       );
       restoreAuthProfileStorePersistenceSnapshot(baseline, committed.owned);
       expect(loadPersistedSharedAuthProfileStore(root.env)?.profiles.shared).toEqual(
         apiKey("original"),
       );
-      expect(snapshotAt(root.agentPath)).toBeUndefined();
-      if (refusedOwner === "child") {
-        expect(snapshotAt(root.sharedPath)?.profiles.shared).toEqual(apiKey("original"));
-        expect(snapshotAt(healthyPath)?.profiles.shared).toEqual(apiKey("original"));
-      } else {
-        expect(snapshotAt(root.sharedPath)).toBeUndefined();
-        expect(snapshotAt(healthyPath)).toBeUndefined();
-      }
+      expect(snapshotAt(root.sharedPath)).toBeUndefined();
       expect(snapshotAt(unrelated.sharedPath)?.profiles.shared).toEqual(apiKey("unrelated"));
-      expect(snapshotAt(unrelated.agentPath)?.profiles.shared).toEqual(apiKey("unrelated"));
-      expect(() => assertAuthProfileMigrationReady(refusedDir, root.env)).toThrow(
+      expect(() => assertAuthProfileMigrationReady(undefined, root.env)).toThrow(
         "requires legacy credential migration",
       );
     },
   );
 
-  it.each([
-    { file: "auth.json", populated: false, refused: true },
-    { file: "auth.json", populated: true, refused: false },
-    { file: "auth-state.json", populated: false, refused: false },
-  ])(
-    "preserves late $file migration semantics with populated=$populated",
-    async ({ file, populated, refused }) => {
-      const root = await seedRoot("original");
-      fs.writeFileSync(path.join(root.agentDir, file), "{}");
-      withEnv(root.env, () =>
-        saveAuthProfileStore(
-          {
-            version: 1,
-            profiles: populated ? { local: apiKey("updated-local") } : {},
-          },
-          root.agentDir,
-          saveOptions,
-        ),
-      );
-      if (refused) {
-        expect(snapshotAt(root.agentPath)).toBeUndefined();
-        expect(() => assertAuthProfileMigrationReady(root.agentDir, root.env)).toThrow(
-          "requires legacy credential migration",
-        );
-      } else {
-        expect(snapshotAt(root.agentPath)?.profiles.shared).toEqual(apiKey("original"));
-        expect(() => assertAuthProfileMigrationReady(root.agentDir, root.env)).not.toThrow();
-      }
-    },
-  );
-
-  it("retains a prepared owner's relocated legacy OAuth discovery during local rebuild", async () => {
-    const root = await seedRoot("original");
-    const oauthDir = tempDirs.make("openclaw-auth-owner-legacy-oauth-");
-    const env = { ...root.env, OPENCLAW_OAUTH_DIR: oauthDir };
-    withEnv(env, () => {
-      saveAuthProfileStore({ version: 1, profiles: {} }, undefined, saveOptions);
-      setRuntimeAuthProfileStoreSnapshot(
-        loadAuthProfileStoreWithoutExternalProfiles(root.agentDir),
-        root.agentDir,
-      );
-      fs.writeFileSync(path.join(oauthDir, "oauth.json"), "{}");
-      saveAuthProfileStore(
-        { version: 1, profiles: { local: apiKey("updated-local") } },
-        root.agentDir,
-        saveOptions,
-      );
-    });
-    expect(snapshotAt(root.agentPath)).toBeUndefined();
-    expect(() => assertAuthProfileMigrationReady(undefined, env)).toThrow(
-      "requires legacy credential migration",
-    );
-  });
+  // NakedClaw: removed the tests of an agent's own late auth.json and auth-state.json,
+  // and of a local rebuild over an empty shared store with relocated legacy OAuth;
+  // agent files are ignored and agent stores do not rebuild (assumption 7).
 
   it.each(
     (["transaction", "connection"] as const).flatMap((source) =>
@@ -581,57 +437,15 @@ describe("auth publication owner receipts", () => {
         apiKey("updated-first"),
       );
       expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("updated-first"));
-      expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("updated-first"));
       expect(loadPersistedSharedAuthProfileStore(second.env)?.profiles.shared).toEqual(
         apiKey("second"),
       );
-      expect(snapshotAt(second.agentPath)?.profiles.shared).toEqual(apiKey("second"));
+      expect(snapshotAt(second.sharedPath)?.profiles.shared).toEqual(apiKey("second"));
     },
   );
 
-  it.each(["ordinary", "supplied"] as const)(
-    "does not relabel another owner's resolved credentials during %s publication",
-    async (publication) => {
-      const first = await seedRoot("first");
-      const second = await seedRoot("second");
-      const sharedRef = {
-        type: "api_key",
-        provider: "openai",
-        keyRef: { source: "env", provider: "default", id: "OPENAI_API_KEY" },
-      } satisfies AuthProfileCredential;
-      for (const root of [first, second]) {
-        await persistAuthProfileBatch({
-          stateDir: root.stateDir,
-          profiles: [{ profileId: "shared", credential: sharedRef }],
-        });
-      }
-      withEnv(first.env, () => {
-        const current = loadAuthProfileStoreWithoutExternalProfiles(first.agentDir);
-        current.profiles.shared = { ...sharedRef, key: "fixture-first-resolved" };
-        current.profiles.external = {
-          type: "oauth",
-          provider: "anthropic",
-          access: "fixture-first-access",
-          refresh: "fixture-first-refresh",
-          expires: Date.now() + 60_000,
-        };
-        current.runtimeExternalProfileIds = ["external"];
-        setRuntimeAuthProfileStoreSnapshot(current, first.agentDir);
-      });
-      withEnv(second.env, () => {
-        const next = loadAuthProfileStoreWithoutExternalProfiles(first.agentDir);
-        if (publication === "ordinary") {
-          saveAuthProfileStore(next, first.agentDir, saveOptions);
-        } else {
-          runAuthProfileWriteTransaction(first.agentDir, (database) => {
-            saveAuthProfileStore(next, first.agentDir, saveOptions, database);
-          });
-        }
-      });
-      expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(sharedRef);
-      expect(snapshotAt(first.agentPath)?.profiles.external).toBeUndefined();
-    },
-  );
+  // NakedClaw: removed the tests of publishing into an agent store outside the state
+  // root; an agent directory names no owner of its own (assumption 7).
 
   it("keeps the original shared owner after a bounded temporary-state exec save", async () => {
     const original = await seedRoot("original");
@@ -646,7 +460,7 @@ describe("auth publication owner receipts", () => {
       stateDir: original.stateDir,
       profiles: [{ profileId: "shared", credential: apiKey("updated-original") }],
     });
-    expect(snapshotAt(original.agentPath)?.profiles.shared).toEqual(apiKey("updated-original"));
+    expect(snapshotAt(original.sharedPath)?.profiles.shared).toEqual(apiKey("updated-original"));
   });
 
   it("keeps relative scope paths bound to their original working directory during preparation", async ({
@@ -688,7 +502,7 @@ describe("auth publication owner receipts", () => {
       stateDir: original.stateDir,
       profiles: [{ profileId: "shared-oauth", credential: oauth }],
     });
-    expect(snapshotAt(original.agentPath)?.profiles["shared-oauth"]).toEqual(oauth);
+    expect(snapshotAt(original.sharedPath)?.profiles["shared-oauth"]).toEqual(oauth);
     const temporary = tempDirs.make("openclaw-auth-owner-bounded-oauth-");
     await withEnvAsync({ ...original.env, OPENCLAW_STATE_DIR: temporary }, async () => {
       await withAuthProfileStoreAgentDir(original.agentDir, original.stateDir, () => {
@@ -700,76 +514,11 @@ describe("auth publication owner receipts", () => {
         ).toBeUndefined();
       });
     });
-    expect(snapshotAt(original.agentPath)?.profiles["shared-oauth"]).toEqual(oauth);
+    expect(snapshotAt(original.sharedPath)?.profiles["shared-oauth"]).toEqual(oauth);
   });
 
-  it("preserves an independently newer runtime owner with identical credential bytes", async () => {
-    const first = await seedRoot("first");
-    const second = await seedRoot("second");
-    const third = await seedRoot("second");
-    withEnv(second.env, () =>
-      setRuntimeAuthProfileStoreSnapshot(
-        loadAuthProfileStoreWithoutExternalProfiles(first.agentDir),
-        first.agentDir,
-      ),
-    );
-    const originalRuntime = snapshotAt(first.agentPath);
-    if (!originalRuntime) {
-      throw new Error("missing second-owner runtime");
-    }
-    const baseline = captureAuthProfileStorePersistenceSnapshot(first.agentDir, {
-      stateDir: first.stateDir,
-    });
-    const committed = saveAuthProfileStoreIfPersistenceSnapshotMatches({
-      snapshot: baseline,
-      agentDir: first.agentDir,
-      stateDir: first.stateDir,
-      store: { version: 1, profiles: { local: apiKey("temporary-local") } },
-      options: saveOptions,
-    });
-    expect(committed.publishRuntimeSnapshots()).toBe(true);
-    withEnv(third.env, () => setRuntimeAuthProfileStoreSnapshot(originalRuntime, first.agentDir));
-    restoreAuthProfileStorePersistenceSnapshot(baseline, committed.owned, first.agentDir, {
-      stateDir: first.stateDir,
-    });
-    expect(snapshotAt(first.agentPath)?.profiles).toEqual(originalRuntime.profiles);
-    await persistAuthProfileBatch({
-      stateDir: third.stateDir,
-      profiles: [{ profileId: "shared", credential: apiKey("updated-third") }],
-    });
-    expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("updated-third"));
-  });
-
-  it("restores the captured runtime owner separately from the persistence transaction owner", async () => {
-    const first = await seedRoot("first");
-    const second = await seedRoot("second");
-    withEnv(second.env, () =>
-      setRuntimeAuthProfileStoreSnapshot(
-        loadAuthProfileStoreWithoutExternalProfiles(first.agentDir),
-        first.agentDir,
-      ),
-    );
-    const baseline = captureAuthProfileStorePersistenceSnapshot(first.agentDir, {
-      stateDir: first.stateDir,
-    });
-    const committed = saveAuthProfileStoreIfPersistenceSnapshotMatches({
-      snapshot: baseline,
-      agentDir: first.agentDir,
-      stateDir: first.stateDir,
-      store: { version: 1, profiles: { local: apiKey("temporary-local") } },
-      options: saveOptions,
-    });
-    expect(committed.publishRuntimeSnapshots()).toBe(true);
-    restoreAuthProfileStorePersistenceSnapshot(baseline, committed.owned, first.agentDir, {
-      stateDir: first.stateDir,
-    });
-    expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("second"));
-    await persistAuthProfileBatch({
-      stateDir: second.stateDir,
-      profiles: [{ profileId: "shared", credential: apiKey("updated-second") }],
-    });
-    expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("updated-second"));
-  });
+  // NakedClaw: removed the tests of an agent snapshot owned by another root than its
+  // persistence transaction; an agent's snapshot is its root's shared one (assumption 7).
 
   it.each(["publish", "compensate"] as const)(
     "reconciles two legacy roots sharing one relocated database during %s",
@@ -783,7 +532,11 @@ describe("auth publication owner receipts", () => {
           OPENCLAW_AGENT_DIR: sharedDir,
         },
       }));
-      writePersistedAuthProfileStoreRaw(store("original"), sharedDir);
+      // NakedClaw: only a scoped run writes an agent directory's own database, here
+      // the relocated legacy store both roots share (assumption 7).
+      authProfileRuntimeMode.run({ kind: "agent-dir", agentDir: sharedDir, env: process.env }, () =>
+        writePersistedAuthProfileStoreRaw(store("original"), sharedDir),
+      );
       for (const root of roots) {
         withEnv(root.env, () =>
           setRuntimeAuthProfileStoreSnapshot(
@@ -810,9 +563,11 @@ describe("auth publication owner receipts", () => {
         );
         restoreAuthProfileStorePersistenceSnapshot(baseline, committed.owned);
       }
-      expect(snapshotAt(resolveAuthProfileDatabasePath(second.agentDir))?.profiles.shared).toEqual(
-        apiKey(operation === "publish" ? "candidate" : "original"),
-      );
+      // NakedClaw: both roots' agents name the relocated legacy store (assumption 7).
+      expect(
+        snapshotAt(withEnv(second.env, () => resolveAuthProfileStorePath(second.agentDir)))
+          ?.profiles.shared,
+      ).toEqual(apiKey(operation === "publish" ? "candidate" : "original"));
     },
   );
 
@@ -820,7 +575,13 @@ describe("auth publication owner receipts", () => {
     const first = await seedRoot("first");
     const coldAgentDir = tempDirs.make("openclaw-auth-owner-unrelated-cold-");
     const assertOuterUnchanged = unreadableOuter("future");
-    replaceRuntimeAuthProfileStoreSnapshots([{ agentDir: coldAgentDir, store: store("cold") }]);
+    replaceRuntimeAuthProfileStoreSnapshots([
+      {
+        databasePath: resolveAuthProfileDatabasePath(coldAgentDir),
+        agentDir: coldAgentDir,
+        store: store("cold"),
+      },
+    ]);
     const prepared = prepareSecretsRuntimeFastPathSnapshot({
       config: {},
       env: first.env,
@@ -834,7 +595,8 @@ describe("auth publication owner receipts", () => {
     expect(() =>
       activateSecretsRuntimeSnapshotState({ ...prepared, refreshHandler: null }),
     ).not.toThrow();
-    expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("first"));
+    // NakedClaw: the secrets runtime publishes only the shared store (assumption 7).
+    expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("first"));
     assertOuterUnchanged();
   });
 });

@@ -59,7 +59,9 @@ export async function persistInlineAuthFailure(
   const effectiveAgentDir = resolveRuntimeAuthProfileAgentDir(agentDir);
   const env = prepareAuthProfileWriteEnvironment({ env: getScopedAuthProfileEnv() });
   if (!effectiveAgentDir) {
-    throw new Error("Inline auth failure requires its selected agent directory");
+    // NakedClaw: no agent has its own store (assumption 7), and inline keys have
+    // no shared profile to cool down; the failure is only logged.
+    return null;
   }
   const databasePath = resolveAuthProfileDatabasePath(effectiveAgentDir);
   return runAuthProfileUsage(async () => {

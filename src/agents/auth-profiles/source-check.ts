@@ -18,6 +18,7 @@ import {
   resolveSharedAuthStorePath,
 } from "./path-resolve.js";
 import { coercePersistedAuthProfileStore } from "./persisted.js";
+import { resolveRuntimeAuthProfileAgentDir } from "./runtime-scope.js";
 import {
   getRuntimeAuthProfileStoreSnapshotCore,
   hasAnyRuntimeAuthProfileStoreSource,
@@ -236,9 +237,11 @@ type AuthProfileSourceForProviderOptions = {
 /** Returns true when a read-only auth-profile source contains a profile for a provider. */
 export function hasAuthProfileStoreSourceForProvider(
   provider: string,
-  agentDir?: string,
+  _agentDir?: string,
   options?: AuthProfileSourceForProviderOptions,
 ): boolean {
+  // NakedClaw: only the store the agent uses can own a provider (assumption 7).
+  const agentDir = resolveRuntimeAuthProfileAgentDir();
   if (!normalizeLowercaseStringOrEmpty(provider)) {
     return false;
   }

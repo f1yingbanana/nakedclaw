@@ -1,12 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../../state/openclaw-agent-db.js";
+import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
 import { runOpenClawAgentWriteAdmission } from "../../state/openclaw-agent-write-admission.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { withEnvAsync } from "../../test-utils/env.js";
@@ -14,6 +12,7 @@ import { cleanupSessionStateForTest } from "../../test-utils/session-state-clean
 import { clearAuthProfileMigrationDiagnostics } from "./legacy-source-diagnostic.js";
 import { withOAuthProfileLock } from "./oauth-profile-lock.js";
 import { createOAuthRefreshFence } from "./oauth-refresh-marker.js";
+import { resolveSharedAuthStoreOwnership, resolveSharedAuthStorePath } from "./path-resolve.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
 import {
   closeAuthProfileReadPool,
@@ -24,11 +23,7 @@ import {
 import { saveAuthProfileStore, updateAuthProfileStoreWithLock } from "./store-runtime.js";
 import * as storeRuntime from "./store-runtime.js";
 import type { ApiKeyCredential, OAuthCredential } from "./types.js";
-import {
-  persistAuthProfileBatch,
-  upsertAuthProfileWithLock,
-  upsertAuthProfileWithLockOrThrow,
-} from "./upsert-with-lock.js";
+import { persistAuthProfileBatch, upsertAuthProfileWithLock } from "./upsert-with-lock.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -58,16 +53,37 @@ async function withAgentDir(run: (agentDir: string) => Promise<void>): Promise<v
   await withEnvAsync({ OPENCLAW_STATE_DIR: root }, async () => await run(agentDir));
 }
 
+/** Fails the shared store's state write, wherever the store lives. */
+function rejectSharedAuthStateWrites(message: string): void {
+  const stateDb = resolveSharedAuthStoreOwnership(process.env).location === "state-db";
+  const database = new DatabaseSync(resolveSharedAuthStorePath(process.env));
+  try {
+    for (const event of ["INSERT", "UPDATE"]) {
+      database.exec(
+        stateDb
+          ? `CREATE TRIGGER reject_auth_state_${event} BEFORE ${event} ON config_machine_state
+             WHEN NEW.state_key = 'authProfiles.state'
+             BEGIN SELECT RAISE(ABORT, '${message}'); END;`
+          : `CREATE TRIGGER reject_auth_state_${event} BEFORE ${event} ON auth_profile_state
+             BEGIN SELECT RAISE(ABORT, '${message}'); END;`,
+      );
+    }
+  } finally {
+    database.close();
+  }
+}
+
 describe("auth profile batch persistence", () => {
+  // NakedClaw: one shared store, so no separate local and shared owners, no
+  // inherited or peer-agent authority, and no per-agent migration or schema
+  // checks on writes (assumption 7; legacy migration is Doctor's).
   it.each([
-    { owner: "local", initial: "missing", root: "selected" },
-    { owner: "local", initial: "existing", root: "selected" },
-    { owner: "shared", initial: "missing", root: "selected" },
-    { owner: "shared", initial: "existing", root: "selected" },
-    { owner: "shared", initial: "missing", root: "changed" },
+    { initial: "missing", root: "selected" },
+    { initial: "existing", root: "selected" },
+    { initial: "missing", root: "changed" },
   ] as const)(
-    "refuses a stale OAuth upsert after $owner $initial authority changes during write admission ($root ambient root)",
-    async ({ owner, initial, root }) => {
+    "refuses a stale OAuth upsert after $initial authority changes during write admission ($root ambient root)",
+    async ({ initial, root }) => {
       await withAgentDir(async (agentDir) => {
         const profileId = "openai:admission";
         const incoming: OAuthCredential = {
@@ -82,7 +98,7 @@ describe("auth profile batch persistence", () => {
           access: "synthetic-new-access",
           refresh: "synthetic-new-refresh",
         };
-        const ownerDir = owner === "local" ? agentDir : undefined;
+        const ownerDir = agentDir;
         const selectedStateDir = path.resolve(agentDir, "../../..");
         const otherStateDir =
           root === "changed" ? tempDirs.make("auth-upsert-other-root-") : undefined;
@@ -92,9 +108,6 @@ describe("auth profile batch persistence", () => {
           ownerDir,
           saveOptions,
         );
-        if (owner === "shared") {
-          saveAuthProfileStore({ version: 1, profiles: {} }, agentDir, saveOptions);
-        }
         const release = createDeferredCore();
         const entered = createDeferredCore();
         const predecessor = runOpenClawAgentWriteAdmission(
@@ -129,56 +142,9 @@ describe("auth profile batch persistence", () => {
         await predecessor;
         await expect(upsert).resolves.toBeNull();
         expect(loadPersistedAuthProfileStore(ownerDir)?.profiles[profileId]).toEqual(authoritative);
-        if (owner === "shared") {
-          expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toBeUndefined();
-        }
       });
     },
   );
-
-  it("refuses inherited OAuth authority that changes during the worker callback handoff", async () => {
-    await withAgentDir(async (agentDir) => {
-      const profileId = "openai:handoff";
-      const incoming: OAuthCredential = {
-        type: "oauth",
-        provider: "openai",
-        access: "synthetic-old-access",
-        refresh: "synthetic-old-refresh",
-        expires: Date.now() + 60_000,
-      };
-      const authoritative: OAuthCredential = {
-        ...incoming,
-        access: "synthetic-new-access",
-        refresh: "synthetic-new-refresh",
-      };
-      const saveOptions = { filterExternalAuthProfiles: false, syncExternalCli: false };
-      saveAuthProfileStore({ version: 1, profiles: {} }, undefined, saveOptions);
-      saveAuthProfileStore({ version: 1, profiles: {} }, agentDir, saveOptions);
-      let callbacks = 0;
-      const realUpdate = storeRuntime.updateAuthProfileStoreWithLock;
-      vi.spyOn(storeRuntime, "updateAuthProfileStoreWithLock").mockImplementation((params) =>
-        realUpdate({
-          ...params,
-          updater(store, owner, sharedStore) {
-            callbacks += 1;
-            saveAuthProfileStore(
-              { version: 1, profiles: { [profileId]: authoritative } },
-              undefined,
-              saveOptions,
-            );
-            return params.updater(store, owner, sharedStore);
-          },
-        }),
-      );
-
-      await expect(
-        upsertAuthProfileWithLock({ agentDir, profileId, credential: incoming }),
-      ).resolves.toBeNull();
-      expect(callbacks).toBe(1);
-      expect(loadPersistedAuthProfileStore()?.profiles[profileId]).toEqual(authoritative);
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toBeUndefined();
-    });
-  });
 
   it("does not restore a fenced OAuth refresh generation", async () => {
     await withAgentDir(async (agentDir) => {
@@ -280,123 +246,6 @@ describe("auth profile batch persistence", () => {
       ).rejects.toThrow("Refused to restore fenced OAuth refresh generation");
       expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(rotated);
     });
-  });
-
-  it("rejects stale copied generations queued for an empty agent store", async () => {
-    const root = tempDirs.make("openclaw-auth-empty-stale-");
-    const mainAgentDir = path.join(root, "agents", "main", "agent");
-    fs.mkdirSync(mainAgentDir, { recursive: true });
-    await withEnvAsync(
-      {
-        OPENCLAW_STATE_DIR: root,
-        OPENCLAW_AGENT_DIR: mainAgentDir,
-      },
-      async () => {
-        const profileId = "openai:default";
-        const credential = {
-          type: "oauth",
-          provider: "openai",
-          access: "expired-access",
-          refresh: "single-use-refresh",
-          expires: Date.now() - 60_000,
-        } satisfies OAuthCredential;
-        const fence = createOAuthRefreshFence({ profileId, credential });
-        const rotated = {
-          ...credential,
-          access: "rotated-access",
-          refresh: "rotated-refresh",
-          expires: Date.now() + 60_000,
-        };
-
-        const peerAgentDir = path.join(root, "agents", "peer", "agent");
-        fs.mkdirSync(peerAgentDir, { recursive: true });
-        saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, mainAgentDir);
-        let queuedWrite: Promise<void> | undefined;
-        await withOAuthProfileLock({ profileId, provider: credential.provider }, async () => {
-          queuedWrite = persistAuthProfileBatch({
-            agentDir: peerAgentDir,
-            profiles: [{ profileId, credential }],
-            resetFailureState: true,
-            allowOAuthGenerationReplacement: true,
-          }).then(() => undefined);
-          await updateAuthProfileStoreWithLock({
-            agentDir: mainAgentDir,
-            updater: (store) => {
-              store.profiles[profileId] = fence;
-              return true;
-            },
-          });
-          await updateAuthProfileStoreWithLock({
-            agentDir: mainAgentDir,
-            updater: (store) => {
-              store.profiles[profileId] = rotated;
-              return true;
-            },
-          });
-        });
-
-        expect(queuedWrite).toBeDefined();
-        await expect(queuedWrite!).rejects.toThrow(
-          "Refused to restore fenced OAuth refresh generation",
-        );
-        expect(loadPersistedAuthProfileStore(peerAgentDir)?.profiles[profileId]).toBeUndefined();
-        expect(loadPersistedAuthProfileStore(mainAgentDir)?.profiles[profileId]).toEqual(rotated);
-      },
-    );
-  });
-
-  it("rejects OAuth writes when authority appears after empty-store admission", async () => {
-    const root = tempDirs.make("openclaw-auth-new-authority-");
-    const mainAgentDir = path.join(root, "agents", "main", "agent");
-    fs.mkdirSync(mainAgentDir, { recursive: true });
-    await withEnvAsync(
-      {
-        OPENCLAW_STATE_DIR: root,
-        OPENCLAW_AGENT_DIR: mainAgentDir,
-      },
-      async () => {
-        const profileId = "openai:default";
-        const incoming = {
-          type: "oauth",
-          provider: "openai",
-          access: "delayed-access",
-          refresh: "delayed-refresh",
-          expires: Date.now() + 60_000,
-        } satisfies OAuthCredential;
-        const authoritative = {
-          ...incoming,
-          access: "fresh-login-access",
-          refresh: "fresh-login-refresh",
-        };
-
-        const peerAgentDir = path.join(root, "agents", "new-peer", "agent");
-        fs.mkdirSync(peerAgentDir, { recursive: true });
-        saveAuthProfileStore({ version: 1, profiles: {} }, mainAgentDir);
-        let queuedWrite: Promise<void> | undefined;
-        await withOAuthProfileLock({ profileId, provider: incoming.provider }, async () => {
-          queuedWrite = persistAuthProfileBatch({
-            agentDir: peerAgentDir,
-            stateDir: root,
-            profiles: [{ profileId, credential: incoming }],
-            resetFailureState: true,
-            allowOAuthGenerationReplacement: true,
-          }).then(() => undefined);
-          saveAuthProfileStore(
-            { version: 1, profiles: { [profileId]: authoritative } },
-            mainAgentDir,
-          );
-        });
-
-        expect(queuedWrite).toBeDefined();
-        await expect(queuedWrite!).rejects.toThrow(
-          "Refused to restore fenced OAuth refresh generation",
-        );
-        expect(loadPersistedAuthProfileStore(peerAgentDir)?.profiles[profileId]).toBeUndefined();
-        expect(loadPersistedAuthProfileStore(mainAgentDir)?.profiles[profileId]).toEqual(
-          authoritative,
-        );
-      },
-    );
   });
 
   it("does not resurrect a refresh fence during batch rollback", async () => {
@@ -710,17 +559,7 @@ describe("auth profile batch persistence", () => {
         },
         agentDir,
       );
-      const database = openOpenClawAgentDatabase({
-        agentId: "work",
-        path: resolveAuthProfileDatabasePath(agentDir),
-      });
-      database.db.exec(`
-        CREATE TRIGGER reject_completed_login_state
-        BEFORE UPDATE ON auth_profile_state
-        BEGIN
-          SELECT RAISE(ABORT, 'injected completed login state failure');
-        END;
-      `);
+      rejectSharedAuthStateWrites("injected completed login state failure");
 
       await expect(
         persistAuthProfileBatch({
@@ -745,68 +584,10 @@ describe("auth profile batch persistence", () => {
     });
   });
 
-  it("reports the migration remediation instead of lock-contention retry advice", async () => {
-    await withAgentDir(async (agentDir) => {
-      // Credentials still living in the retired JSON store: the write can never
-      // succeed, so retry advice would loop the operator forever.
-      fs.writeFileSync(
-        path.join(agentDir, "auth-profiles.json"),
-        JSON.stringify({
-          version: 1,
-          profiles: { "openai:legacy": apiKey("sk-json-era") },
-        }),
-      );
-
-      const failure = await upsertAuthProfileWithLockOrThrow({
-        agentDir,
-        profileId: "openai:new",
-        credential: apiKey("sk-new"),
-      }).catch((error: unknown) => error);
-
-      expect(String(failure)).toContain("requires legacy credential migration");
-      expect(String(failure)).toContain("openclaw doctor --fix");
-      expect(String(failure)).not.toContain("lock may be busy");
-    });
-  });
-
-  it("reports a schema write failure instead of lock-contention retry advice", async () => {
-    await withAgentDir(async (agentDir) => {
-      await upsertAuthProfileWithLockOrThrow({
-        agentDir,
-        profileId: "openai:existing",
-        credential: apiKey("sk-existing"),
-      });
-      openOpenClawAgentDatabase({
-        agentId: "work",
-        path: resolveAuthProfileDatabasePath(agentDir),
-      }).db.exec("ALTER TABLE auth_profile_store DROP COLUMN updated_at");
-
-      const failure = await upsertAuthProfileWithLockOrThrow({
-        agentDir,
-        profileId: "openai:new",
-        credential: apiKey("sk-new"),
-      }).catch((error: unknown) => error);
-
-      expect(failure).toMatchObject({ name: "SqliteSchemaMismatchError" });
-      expect(String(failure)).toContain("column definitions differ for auth_profile_store");
-      expect(String(failure)).toContain("openclaw doctor --fix");
-      expect(String(failure)).not.toContain("lock may be busy");
-    });
-  });
-
   it("leaves no partial profile batch when the SQLite state write fails", async () => {
     await withAgentDir(async (agentDir) => {
-      const database = openOpenClawAgentDatabase({
-        agentId: "work",
-        path: resolveAuthProfileDatabasePath(agentDir),
-      });
-      database.db.exec(`
-        CREATE TRIGGER reject_auth_profile_batch_state
-        BEFORE INSERT ON auth_profile_state
-        BEGIN
-          SELECT RAISE(ABORT, 'injected auth batch state failure');
-        END;
-      `);
+      saveAuthProfileStore({ version: 1, profiles: {} }, agentDir);
+      rejectSharedAuthStateWrites("injected auth batch state failure");
 
       await expect(
         persistAuthProfileBatch({
@@ -816,7 +597,7 @@ describe("auth profile batch persistence", () => {
         }),
       ).rejects.toThrow("injected auth batch state failure");
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toBeNull();
+      expect(loadPersistedAuthProfileStore(agentDir)?.profiles ?? {}).toEqual({});
     });
   });
 });

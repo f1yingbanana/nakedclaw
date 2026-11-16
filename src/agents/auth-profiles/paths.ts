@@ -15,6 +15,7 @@ import {
   resolveSharedAuthStoreOwnershipAsync,
   resolveSharedAuthStorePath,
 } from "./path-resolve.js";
+import { resolveRuntimeAuthProfileAgentDir } from "./runtime-scope.js";
 import { prepareAgentAuthProfileRowsRead } from "./sqlite-read.js";
 import {
   inspectPersistedAuthProfileStoreRaw,
@@ -36,7 +37,9 @@ function normalizeDisplayPath(pathname: string, env: NodeJS.ProcessEnv = process
 }
 
 /** Resolve the user-facing path for the database selected by the auth store loader. */
-export function resolveAuthStorePathForDisplay(agentDir?: string): string {
+export function resolveAuthStorePathForDisplay(_agentDir?: string): string {
+  // NakedClaw: only a scoped run has a store of its own (assumption 7).
+  const agentDir = resolveRuntimeAuthProfileAgentDir();
   const localPath = agentDir
     ? path.join(resolveUserPath(agentDir), "openclaw-agent.sqlite")
     : undefined;
@@ -49,7 +52,7 @@ export function resolveAuthStorePathForDisplay(agentDir?: string): string {
 
 /** Private model preparation: inspect the original source once before formatting its labels. */
 export async function withPreparedAuthStorePathForDisplay<T>(
-  agentDir: string | undefined,
+  _agentDir: string | undefined,
   env: NodeJS.ProcessEnv,
   assertCurrent: () => void,
   consume: (pathname: string) => T,
@@ -57,8 +60,10 @@ export async function withPreparedAuthStorePathForDisplay<T>(
   assertCurrent();
   const capturedEnv = cloneEnvWithPlatformSemantics(env);
   capturedEnv.OPENCLAW_STATE_DIR = resolveStateDir(capturedEnv);
-  const localPath = agentDir
-    ? path.join(resolveUserPath(agentDir, capturedEnv), "openclaw-agent.sqlite")
+  // NakedClaw: only a scoped run has a store of its own (assumption 7).
+  const ownDir = resolveRuntimeAuthProfileAgentDir();
+  const localPath = ownDir
+    ? path.join(resolveUserPath(ownDir, capturedEnv), "openclaw-agent.sqlite")
     : undefined;
   const local = localPath
     ? prepareAgentAuthProfileRowsRead({

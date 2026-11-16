@@ -17,10 +17,7 @@ const mocks = vi.hoisted(() => ({
   migrate: vi.fn(),
   journal: vi.fn(),
   opened: vi.fn(),
-  refreshSecrets: vi.fn(),
   refreshModels: vi.fn(),
-  snapshot: vi.fn(),
-  revision: vi.fn(),
   info: vi.fn(),
   warn: vi.fn(),
 }));
@@ -56,12 +53,6 @@ vi.mock("../agents/prepared-model-runtime.configured.js", () => ({
   listConfiguredOwnerInputs: (cfg: OpenClawConfig) =>
     Object.keys(cfg.agents!.entries!).map((agentId) => ({ agentId })),
 }));
-// mock-isolation: Track global revision/config publication without credentials or providers.
-vi.mock("../secrets/runtime.js", () => ({
-  getActiveSecretsRuntimeSnapshot: mocks.snapshot,
-  getActiveSecretsRuntimeSnapshotRevision: mocks.revision,
-  refreshActiveSecretsRuntimeSnapshotForConfig: mocks.refreshSecrets,
-}));
 // mock-isolation: Capture startup diagnostics without process logging state.
 vi.mock("../logging/subsystem.js", () => ({
   createSubsystemLogger: () => ({ info: mocks.info, warn: mocks.warn }),
@@ -96,7 +87,6 @@ function createFleet(
     fs.mkdirSync(path.dirname(pathname), { recursive: true });
     fs.writeFileSync(pathname, "synthetic file identity; native admission is mocked");
   }
-  let revision = 0;
   const opened = createDeferredCore();
   let openCount = 0;
   mocks.opened.mockImplementation(() => {
@@ -106,21 +96,6 @@ function createFleet(
   });
   mocks.journal.mockResolvedValue("absent");
   mocks.migrate.mockImplementation(async ({ assertCurrent }) => assertCurrent());
-  mocks.revision.mockImplementation(() => revision);
-  mocks.snapshot.mockImplementation(() => ({
-    sourceConfig: cfg,
-    authStores: paths.map((databasePath) => ({ databasePath })),
-  }));
-  mocks.refreshSecrets.mockImplementation(
-    async ({ assertCurrent }: { assertCurrent: () => void }) => {
-      assertCurrent();
-      // Resolved credentials may rotate while the authored session configuration stays fixed.
-      cfg = structuredClone(cfg);
-      revision++;
-      cfg.gateway!.auth!.token = `synthetic-refresh-${revision}`;
-      return true;
-    },
-  );
   const gates: ReturnType<typeof createDeferredCore<void>>[] = [];
   const hold = () => {
     const gate = createDeferredCore();
@@ -234,13 +209,11 @@ it("admits a small deferred agent while an earlier agent's session migration is 
         phaseDurationsMs: expect.objectContaining({
           inspection: expect.any(Number),
           migration: 0,
-          secrets: 0,
           models: 0,
           publication: 0,
         }),
       }),
     );
-    // B's secrets publication replaced the config while A was migrating.
     releaseMigration.resolve();
     await vi.advanceTimersByTimeAsync(0);
     expect(readAgentDatabaseAdmissionRefusal("large", fleet)).toBeUndefined();
@@ -286,7 +259,6 @@ it("holds the publication turn through models and the final deletion check", asy
     fleet.inspect(1);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(mocks.migrate).toHaveBeenCalledTimes(2);
-    expect(mocks.refreshSecrets).toHaveBeenCalledTimes(1);
     expect(mocks.warn).toHaveBeenCalledWith(
       progressMessage,
       expect.objectContaining({
@@ -298,7 +270,6 @@ it("holds the publication turn through models and the final deletion check", asy
     releaseModels.resolve();
     await withinTest(journalEntered.promise, signal);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(mocks.refreshSecrets).toHaveBeenCalledTimes(1);
     expect(readAgentDatabaseAdmissionRefusal("small", fleet)?.code).toBe(
       "agent-database-inspection-pending",
     );

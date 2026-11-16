@@ -64,7 +64,9 @@ async function seedAuthRows(state: OpenClawTestState, local: unknown = localStor
 }
 
 describe("plugin model catalog auth capture", () => {
-  it("captures cold shared and local credentials from the explicit root through workers", async () => {
+  // NakedClaw: the agent database's leftover auth rows are ignored; only the shared
+  // store holds credentials (assumption 7).
+  it("captures cold shared credentials from the explicit root through workers", async () => {
     await withOpenClawTestState({ label: "catalog-auth-ambient" }, async () => {
       await withOpenClawTestState(
         { label: "catalog-auth-explicit", applyEnv: false },
@@ -90,11 +92,7 @@ describe("plugin model catalog auth capture", () => {
                   "catalog-fixture:shared": ["shared-access-not-real", "shared-refresh-not-real"],
                 },
               },
-              {
-                databasePath: localPath,
-                kind: "agent",
-                credentials: { "catalog-fixture:local": ["local-key-not-real"] },
-              },
+              { databasePath: localPath, kind: "agent", credentials: {} },
             ]);
           } finally {
             syncOwnership.mockRestore();
@@ -105,18 +103,6 @@ describe("plugin model catalog auth capture", () => {
     });
   });
 
-  it("refuses an unreadable local store instead of publishing a partial auth snapshot", async () => {
-    await withOpenClawTestState({ label: "catalog-auth-unreadable" }, async (state) => {
-      const { agentDir, localPath } = await seedAuthRows(state, {
-        version: 1,
-        profiles: "invalid-profile-map",
-      });
-
-      await expect(capturePluginModelCatalogAuth(agentDir, state.env)).rejects.toMatchObject({
-        code: "AUTH_PROFILE_STORE_UNREADABLE",
-        action: "openclaw doctor --fix",
-        databasePath: localPath,
-      });
-    });
-  });
+  // NakedClaw: removed the test of refusing an unreadable agent store; agent auth
+  // rows are not read (assumption 7).
 });

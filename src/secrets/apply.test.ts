@@ -4,9 +4,7 @@ import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { registerResolvedAgentDir } from "../agents/agent-dir-registry.js";
 import { createAuthProfileStoreFixture } from "../agents/auth-profiles/credential-fixtures.test-support.js";
-import { getRuntimeAuthProfileStoreCredentialMutationToken } from "../agents/auth-profiles/mutation-lineage.js";
 import { noteCommittedSharedAuthStoreOwnership } from "../agents/auth-profiles/path-resolve.js";
 import { failNextRuntimeAuthSnapshotPublication } from "../agents/auth-profiles/profile-mutations.test-support.js";
 import {
@@ -18,14 +16,11 @@ import {
   readPersistedAuthProfileStoreRaw,
   readPersistedSharedAuthProfileStoreRaw,
   resolveAuthProfileDatabasePath,
-  writePersistedAuthProfileStateRaw,
 } from "../agents/auth-profiles/sqlite.js";
 import {
   loadAuthProfileStoreWithoutExternalProfiles,
   saveAuthProfileStore,
 } from "../agents/auth-profiles/store-runtime.js";
-import { getRuntimeAuthProfileStoreSnapshot } from "../agents/auth-profiles/store.js";
-import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
@@ -43,7 +38,6 @@ import {
 import {
   createApplyFixture,
   createOpenAiProviderConfig,
-  mutateAuthStoreBeforeNextPublication,
   OPENAI_API_KEY_ENV_REF,
   readAuthStore,
   seedDefaultApplyFixture,
@@ -374,9 +368,10 @@ describe("secrets apply", () => {
 
   it("keeps shared and implicit agent writes inside the explicitly routed state root", async () => {
     const ambientStateDir = path.join(fixture.rootDir, "ambient-state");
-    const ambientMainDir = path.join(ambientStateDir, "agents", "main", "agent");
-    const ambientOpsDir = path.join(ambientStateDir, "agents", "ops", "agent");
+    const ambientEnv = { OPENCLAW_STATE_DIR: ambientStateDir };
     vi.stubEnv("OPENCLAW_STATE_DIR", ambientStateDir);
+    // NakedClaw: an agent has no store of its own, so the ambient root holds only its
+    // shared store (assumption 7).
     saveAuthProfileStore(
       createAuthProfileStoreFixture({
         "openai:ambient-shared": {
@@ -385,18 +380,7 @@ describe("secrets apply", () => {
           key: "sk-ambient-shared",
         },
       }),
-      ambientMainDir,
-      { filterExternalAuthProfiles: false, syncExternalCli: false },
-    );
-    saveAuthProfileStore(
-      createAuthProfileStoreFixture({
-        "openai:ambient-ops": {
-          type: "api_key",
-          provider: "openai",
-          key: "sk-ambient-ops",
-        },
-      }),
-      ambientOpsDir,
+      undefined,
       { filterExternalAuthProfiles: false, syncExternalCli: false },
     );
     await writeJsonFile(fixture.configPath, {
@@ -406,13 +390,13 @@ describe("secrets apply", () => {
     const stateDatabase = openOpenClawStateDatabase({ env: fixture.env }).db;
     stateDatabase
       .prepare(
-        `INSERT INTO config_machine_state (state_key, value_json, updated_at_ms)
+        `INSERT OR REPLACE INTO config_machine_state (state_key, value_json, updated_at_ms)
          VALUES ('auth.sharedStore', ?, 1)`,
       )
       .run(JSON.stringify({ location: "state-db" }));
     stateDatabase
       .prepare(
-        "INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, 1)",
+        "INSERT OR REPLACE INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, 1)",
       )
       .run(
         "authProfiles.store",
@@ -446,15 +430,14 @@ describe("secrets apply", () => {
         },
       },
     });
-    expect(readPersistedAuthProfileStoreRaw(ambientMainDir)).toMatchObject({
+    expect(readPersistedSharedAuthProfileStoreRaw(ambientEnv)).toMatchObject({
       profiles: { "openai:ambient-shared": { key: "sk-ambient-shared" } },
     });
-    expect(readPersistedAuthProfileStoreRaw(ambientOpsDir)).toMatchObject({
-      profiles: { "openai:ambient-ops": { key: "sk-ambient-ops" } },
-    });
-    expect(
-      readPersistedAuthProfileStoreRaw(path.join(fixture.stateDir, "agents", "ops", "agent")),
-    ).toBeNull();
+    await expect(
+      fs.stat(
+        resolveAuthProfileDatabasePath(path.join(fixture.stateDir, "agents", "ops", "agent")),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("skips exec SecretRef checks during dry-run unless explicitly allowed", async () => {
@@ -597,57 +580,8 @@ describe("secrets apply", () => {
     );
   });
 
-  it("preserves relocated shared inheritance when applying an agent SecretRef", async () => {
-    const sharedDir = path.join(fixture.rootDir, "relocated-shared");
-    const agentDir = path.join(fixture.rootDir, "ops-agent");
-    fixture.env.OPENCLAW_AGENT_DIR = sharedDir;
-    vi.stubEnv("OPENCLAW_STATE_DIR", fixture.stateDir);
-    vi.stubEnv("OPENCLAW_AGENT_DIR", sharedDir);
-    noteCommittedSharedAuthStoreOwnership({ location: "legacy-main" }, fixture.env);
-    const shared: AuthProfileStore = createAuthProfileStoreFixture({
-      "openai:inherited": { type: "api_key", provider: "openai", key: "fake-inherited" },
-    });
-    const local: AuthProfileStore = createAuthProfileStoreFixture({
-      "openai:local": { type: "api_key", provider: "openai", key: "fake-local" },
-    });
-    registerResolvedAgentDir({ agentId: "ops", agentDir });
-    await writeJsonFile(resolveAuthProfileDatabasePath(sharedDir), shared);
-    await writeJsonFile(resolveAuthProfileDatabasePath(agentDir), local);
-    await writeJsonFile(fixture.configPath, { agents: { entries: { ops: { agentDir } } } });
-    replaceRuntimeAuthProfileStoreSnapshots([
-      { agentDir, store: loadAuthProfileStoreWithoutExternalProfiles(agentDir) },
-    ]);
-    expect(getRuntimeAuthProfileStoreSnapshot(agentDir)?.profiles["openai:inherited"]).toEqual(
-      shared.profiles["openai:inherited"],
-    );
-    await runSecretsApply({
-      plan: createPlan({
-        targets: [
-          {
-            type: "auth-profiles.api_key.key",
-            path: "profiles.openai:local.key",
-            pathSegments: ["profiles", "openai:local", "key"],
-            agentId: "ops",
-            ref: OPENAI_API_KEY_ENV_REF,
-          },
-        ],
-        options: {
-          scrubEnv: false,
-          scrubAuthProfilesForProviderTargets: false,
-          scrubLegacyAuthJson: false,
-        },
-      }),
-      env: fixture.env,
-      write: true,
-    });
-    expect(readPersistedAuthProfileStoreRaw(agentDir)).toMatchObject({
-      profiles: { "openai:local": { keyRef: OPENAI_API_KEY_ENV_REF } },
-    });
-    expect(readPersistedAuthProfileStoreRaw(sharedDir)).toEqual(shared);
-    const runtime = getRuntimeAuthProfileStoreSnapshot(agentDir);
-    expect(runtime?.profiles["openai:inherited"]).toEqual(shared.profiles["openai:inherited"]);
-    expect(runtime?.profiles["openai:default"]).toBeUndefined();
-  });
+  // NakedClaw: removed the test of an agent store inheriting a relocated shared store;
+  // agents have no stores of their own (assumption 7).
 
   it("rolls back committed auth rows when runtime publication fails", async () => {
     await writeJsonFile(
@@ -679,11 +613,9 @@ describe("secrets apply", () => {
         scrubLegacyAuthJson: false,
       },
     });
+    // The main agent's credentials live in the shared store (assumption 7).
     replaceRuntimeAuthProfileStoreSnapshots([
-      {
-        agentDir: fixture.agentDir,
-        store: loadAuthProfileStoreWithoutExternalProfiles(fixture.agentDir),
-      },
+      { store: loadAuthProfileStoreWithoutExternalProfiles() },
     ]);
     const publicationFailure = failNextRuntimeAuthSnapshotPublication();
 
@@ -696,204 +628,47 @@ describe("secrets apply", () => {
     expect(readPersistedAuthProfileStateRaw(fixture.agentDir)).toEqual(stateBefore);
   });
 
-  it("uses the configured agent id for custom auth-profile target agent dirs", async () => {
-    const coderAgentDir = path.join(fixture.rootDir, "custom-coder-agent");
-    const coderStorePath = resolveAuthProfileDatabasePath(coderAgentDir);
+  // NakedClaw: removed the tests of per-agent auth stores in one apply (creating a
+  // configured agent's store, rolling back across stores, a concurrent write to
+  // one agent's store while another's fails); every agent writes the shared store
+  // (assumption 7).
+
+  it("scrubs the shared store once when agent databases exist", async () => {
+    // Every agent has a database for its sessions; none holds credentials.
     await writeJsonFile(fixture.configPath, {
-      agents: {
-        entries: { coder: { agentDir: coderAgentDir } },
-      },
+      agents: { entries: { ops: {} } },
+      models: { providers: { openai: createOpenAiProviderConfig() } },
     });
-    const plan = createPlan({
-      targets: [
-        {
-          type: "auth-profiles.api_key.key",
-          path: "profiles.openai:default.key",
-          pathSegments: ["profiles", "openai:default", "key"],
-          agentId: "coder",
-          ref: { source: "env", provider: "default", id: "OPENAI_API_KEY" },
-          authProfileProvider: "openai",
-        },
-      ],
-      options: {
-        scrubEnv: false,
-        scrubAuthProfilesForProviderTargets: false,
-        scrubLegacyAuthJson: false,
-      },
-    });
-
-    const result = await runSecretsApply({ plan, env: fixture.env, write: true });
-
-    expect(result.changedFiles).toContain(coderStorePath);
-    const database = openOpenClawAgentDatabase({
-      agentId: "coder",
-      path: coderStorePath,
-    });
-    expect(database.agentId).toBe("coder");
-  });
-
-  it("atomically deletes a newly created auth store when a later auth write fails", async () => {
-    const firstAgentDir = path.join(fixture.rootDir, "custom-first-agent");
-    const secondAgentDir = path.join(fixture.rootDir, "custom-second-agent");
-    const firstStorePath = resolveAuthProfileDatabasePath(firstAgentDir);
-    const secondStorePath = resolveAuthProfileDatabasePath(secondAgentDir);
-    await writeJsonFile(fixture.configPath, {
-      agents: {
-        ownership: "explicit",
-        entries: {
-          first: { agentDir: firstAgentDir },
-          second: { agentDir: secondAgentDir },
-        },
-      },
-    });
-    const firstState = {
-      version: 1 as const,
-      order: { openai: ["openai:preexisting"] },
-    };
-    const firstDatabase = openOpenClawAgentDatabase({
-      agentId: "first",
-      path: firstStorePath,
-    });
-    writePersistedAuthProfileStateRaw(firstState, firstAgentDir, firstDatabase);
-    replaceRuntimeAuthProfileStoreSnapshots([
-      { agentDir: firstAgentDir, store: { profiles: {}, ...firstState } },
-    ]);
-    const firstMutationRevision =
-      getRuntimeAuthProfileStoreCredentialMutationToken(firstAgentDir).revision;
-    const secondDatabase = openOpenClawAgentDatabase({
-      agentId: "second",
-      path: secondStorePath,
-    });
-    secondDatabase.db.exec(`
-      CREATE TRIGGER reject_second_auth_store_insert
-      BEFORE INSERT ON auth_profile_store
-      BEGIN
-        SELECT RAISE(ABORT, 'injected second auth store failure');
-      END;
-    `);
-    const authTarget = (agentId: string): SecretsApplyPlan["targets"][number] => ({
-      type: "auth-profiles.api_key.key",
-      path: "profiles.openai:default.key",
-      pathSegments: ["profiles", "openai:default", "key"],
-      agentId,
-      ref: OPENAI_API_KEY_ENV_REF,
-      authProfileProvider: "openai",
-    });
-    const plan = createPlan({
-      targets: [authTarget("first"), authTarget("second")],
-      options: {
-        scrubEnv: false,
-        scrubAuthProfilesForProviderTargets: false,
-        scrubLegacyAuthJson: false,
-      },
-    });
-
-    await expect(runSecretsApply({ plan, env: fixture.env, write: true })).rejects.toThrow(
-      "injected second auth store failure",
+    await writeJsonFile(
+      fixture.authStorePath,
+      createAuthProfileStoreFixture({
+        "openai:default": { type: "api_key", provider: "openai", key: "sk-openai-plaintext" },
+      }),
     );
-
-    expect(await fs.stat(firstStorePath)).toBeDefined();
-    expect(readPersistedAuthProfileStoreRaw(firstAgentDir)).toBeNull();
-    expect(readPersistedAuthProfileStateRaw(firstAgentDir)).toEqual(firstState);
-    expect(getRuntimeAuthProfileStoreSnapshot(firstAgentDir)).toMatchObject({
-      profiles: {},
-      order: firstState.order,
-    });
-    expect(
-      getRuntimeAuthProfileStoreCredentialMutationToken(firstAgentDir).revision,
-    ).toBeGreaterThan(firstMutationRevision);
-  });
-
-  it.each(["credentials", "state"] as const)(
-    "preserves a concurrent auth %s write when a later auth store write fails",
-    async (concurrentMutation) => {
-      const firstAgentDir = path.join(fixture.rootDir, `concurrent-${concurrentMutation}-agent`);
-      const secondAgentDir = path.join(fixture.rootDir, "concurrent-failing-agent");
-      const secondStorePath = resolveAuthProfileDatabasePath(secondAgentDir);
-      registerResolvedAgentDir({ agentId: "first", agentDir: firstAgentDir });
-      registerResolvedAgentDir({ agentId: "second", agentDir: secondAgentDir });
-      await writeJsonFile(fixture.configPath, {
-        agents: {
-          ownership: "explicit",
-          entries: {
-            first: { agentDir: firstAgentDir },
-            second: { agentDir: secondAgentDir },
-          },
-        },
-      });
-      const initialStore: AuthProfileStore = {
-        version: 1,
-        profiles: {
-          "openai:default": {
-            type: "api_key",
-            provider: "openai",
-            key: "sk-before-apply", // pragma: allowlist secret
-          },
-          "openai:oauth": {
-            type: "oauth",
-            provider: "openai",
-            access: "oauth-before-apply",
-            refresh: "refresh-before-apply",
-            expires: Date.now() + 60_000,
-          },
-        },
-        order: { openai: ["openai:default"] },
-      };
-      saveAuthProfileStore(initialStore, firstAgentDir, { syncExternalCli: false });
-      replaceRuntimeAuthProfileStoreSnapshots([{ agentDir: firstAgentDir, store: initialStore }]);
-      const secondDatabase = openOpenClawAgentDatabase({
-        agentId: "second",
-        path: secondStorePath,
-      });
-      secondDatabase.db.exec(`
-        CREATE TRIGGER reject_concurrent_second_auth_store_insert
-        BEFORE INSERT ON auth_profile_store
-        BEGIN
-          SELECT RAISE(ABORT, 'injected concurrent second auth store failure');
-        END;
-      `);
-      const authTarget = (agentId: string): SecretsApplyPlan["targets"][number] => ({
-        type: "auth-profiles.api_key.key",
-        path: "profiles.openai:default.key",
-        pathSegments: ["profiles", "openai:default", "key"],
+    for (const agentId of ["main", "ops"]) {
+      openOpenClawAgentDatabase({
         agentId,
-        ref: OPENAI_API_KEY_ENV_REF,
-        authProfileProvider: "openai",
+        path: resolveAuthProfileDatabasePath(
+          path.join(fixture.stateDir, "agents", agentId, "agent"),
+        ),
       });
-      const plan = createPlan({
-        targets: [authTarget("first"), authTarget("second")],
-        options: {
-          scrubEnv: false,
-          scrubAuthProfilesForProviderTargets: false,
-          scrubLegacyAuthJson: false,
-        },
-      });
+    }
+    closeOpenClawAgentDatabasesForTest();
 
-      mutateAuthStoreBeforeNextPublication(firstAgentDir, concurrentMutation);
+    await runSecretsApply({
+      plan: createPlan({
+        targets: [createOpenAiProviderTarget()],
+        options: createOneWayScrubOptions(),
+      }),
+      env: fixture.env,
+      write: true,
+    });
 
-      await expect(runSecretsApply({ plan, env: fixture.env, write: true })).rejects.toThrow(
-        "injected concurrent second auth store failure",
-      );
-
-      const persisted = await readAuthStore({ ...fixture, agentDir: firstAgentDir });
-      const runtime = getRuntimeAuthProfileStoreSnapshot(firstAgentDir);
-      if (concurrentMutation === "credentials") {
-        expect(persisted.profiles["openai:oauth"]).toMatchObject({
-          access: "oauth-concurrent",
-          refresh: "refresh-concurrent",
-        });
-        expect(runtime?.profiles["openai:oauth"]).toMatchObject({
-          access: "oauth-concurrent",
-          refresh: "refresh-concurrent",
-        });
-      } else {
-        expect(persisted.profiles["openai:default"]).toMatchObject({ key: "sk-before-apply" });
-        expect(persisted.order?.openai).toEqual(["openai:oauth", "openai:default"]);
-        expect(runtime?.profiles["openai:default"]).toMatchObject({ key: "sk-before-apply" });
-        expect(runtime?.order?.openai).toEqual(["openai:oauth", "openai:default"]);
-      }
-    },
-  );
+    expect(readPersistedSharedAuthProfileStoreRaw(fixture.env)).toEqual({
+      version: 1,
+      profiles: { "openai:default": { type: "api_key", provider: "openai" } },
+    });
+  });
 
   it("preserves unrelated oauth profiles while applying auth-profile key ref targets", async () => {
     const codexOAuthRef = {

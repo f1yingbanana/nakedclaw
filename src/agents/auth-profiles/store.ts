@@ -54,7 +54,7 @@ import {
   type AuthProfileReadOwner,
   type LoadAuthProfileStoreOptions,
 } from "./runtime-read.js";
-import { authProfileRuntimeMode } from "./runtime-scope.js";
+import { authProfileRuntimeMode, resolveRuntimeAuthProfileAgentDir } from "./runtime-scope.js";
 import {
   captureRuntimeAuthProfileLegacyCandidates,
   pruneAuthProfileStoreReferences,
@@ -179,11 +179,6 @@ export function applyScopedAuthReadThrough(store: AuthProfileStore): AuthProfile
 
 function isEnvOnlyAuthProfileRuntime(): boolean {
   return authProfileRuntimeMode.getStore()?.kind === "env-only";
-}
-
-export function resolveRuntimeAuthProfileAgentDir(agentDir?: string): string | undefined {
-  const mode = authProfileRuntimeMode.getStore();
-  return mode?.kind === "agent-dir" ? mode.agentDir : agentDir;
 }
 
 function resolveRuntimeAuthProfileLoadOptions(
@@ -362,6 +357,8 @@ export {
   hasAuthProfileStoreSourceForProvider,
   hasLocalAuthProfileStoreSource,
 } from "./source-check.js";
+
+export { resolveRuntimeAuthProfileAgentDir };
 
 /** Return the lifecycle-published effective auth store without persisted fallback reads. */
 export function getPreparedRuntimeAuthProfileStoreSnapshot(
@@ -686,9 +683,12 @@ function reconcileRuntimeAuthProfileStorePersistenceSnapshot(params: {
 export function restoreAuthProfileStorePersistenceSnapshot(
   snapshot: AuthProfileStorePersistenceSnapshot,
   owned: AuthProfileStorePersistenceSnapshot,
-  agentDir?: string,
+  _agentDir?: string,
   options: { stateDir?: string } = {},
 ): void {
+  // NakedClaw: restores the store the capture chose, the shared one unless a
+  // scoped run owns its directory (assumption 7).
+  const agentDir = resolveRuntimeAuthProfileAgentDir();
   assertAuthProfilePersistenceOwner(owned.owner, agentDir, options.stateDir);
   if (
     snapshot.owner.databasePath !== owned.owner.databasePath ||

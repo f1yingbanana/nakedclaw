@@ -2,7 +2,6 @@ import { on, once } from "node:events";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import type { MessagePort } from "node:worker_threads";
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { sleepWithAbort } from "@openclaw/retry";
 import { clearNodeSqliteKyselyCacheForDatabase } from "../../infra/kysely-sync-cache-state.js";
 import { sqliteReaderDatabasePathKey } from "../../infra/sqlite-reader-lifecycle.js";
@@ -32,7 +31,6 @@ import {
   runOpenClawAgentWriteTransaction,
   type OpenClawAgentDatabaseWorkerCloseResult,
 } from "../../state/openclaw-agent-db.js";
-import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db-cache.js";
 import type { CanonicalSessionValidationResult } from "./session-accessor.sqlite-contract.js";
 import { assertSessionSubagentRunsCurrent } from "./session-accessor.sqlite-descendant-basis.js";
 import type { SqliteSessionReclamationPlan } from "./session-accessor.sqlite-lifecycle-types.js";
@@ -216,14 +214,13 @@ async function runColdMutationWorker(port: MessagePort, data: SessionColdWorkerD
 export async function runReclamationWorkerPort(
   port: MessagePort,
   databaseOptions: SqliteSessionReclamationPlan["databaseOptions"],
-  pooledTask?: { operationId: number },
 ): Promise<{ cleanupWarnings: string[]; settled: boolean }> {
   let reclaimSqliteSessionInTransaction: typeof import("./session-accessor.sqlite-reclamation.js").reclaimSqliteSessionInTransaction;
   let claim: OpenClawAgentDatabaseClaim | undefined;
   let retainedDatabase: DatabaseSync | undefined;
   let lease: OpenClawAgentDatabaseWorkerLeaseReceipt | undefined;
   let commitGate: SharedArrayBuffer | undefined;
-  let operationId = pooledTask?.operationId ?? 0;
+  let operationId = 0;
   let failureCleanup: Awaited<ReturnType<typeof settleReclamationDatabase>> | undefined;
   let checkpointResultOwnedByRequest = false;
   const checkpointPath = sqliteReaderDatabasePathKey(databaseOptions.path);
@@ -269,9 +266,6 @@ export async function runReclamationWorkerPort(
       ) {
         throw new Error("SQLite session reclamation database owner is no longer current");
       }
-      if (pooledTask) {
-        pooledTask.operationId = operationId;
-      }
       failureCleanup = undefined;
       const response = await runWithSqliteMutationWorkerCoordination(
         request.coordination,
@@ -280,13 +274,6 @@ export async function runReclamationWorkerPort(
         async (options) => {
           if (request.type === "close") {
             const cleanup = await closeDatabase();
-            if (pooledTask) {
-              if (!cleanup.settled) {
-                throw new Error("Canonical validation task could not close its agent database");
-              }
-              // Keep native close under this task's coordinator and parent's writer admission.
-              closeOpenClawStateDatabaseByPath(request.coordination.databasePath);
-            }
             return {
               type: "closed",
               ...cleanup,
@@ -471,10 +458,8 @@ export async function runReclamationWorkerPort(
               validation,
             } satisfies SqliteMutationWorkerMessage<typeof result>;
           } catch (error) {
-            // Canonical validation retains its scoped native-failure/drain contract.
             if (
               (request.type === "reclaim" || request.type === "prepare") &&
-              !pooledTask &&
               error instanceof SqliteReclamationRequestRefusedError &&
               ((!claim && !retainedDatabase) ||
                 (claim?.isCurrent() && retainedDatabase?.isOpen && !retainedDatabase.isTransaction))
@@ -493,16 +478,6 @@ export async function runReclamationWorkerPort(
       );
       if (response.type === "closed") {
         port.postMessage(response);
-        if (pooledTask) {
-          const [release]: unknown[] = await once(port, "message");
-          if (
-            !isRecord(release) ||
-            release.type !== "release" ||
-            release.operationId !== operationId
-          ) {
-            throw new Error("Canonical validation task received an invalid close release");
-          }
-        }
         port.close();
         return response;
       }

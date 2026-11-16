@@ -3,14 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { runDoctorSessionSqlite } from "../commands/doctor-session-sqlite.js";
 import {
   loadExactSessionEntry,
   loadExactSessionEntryReadOnly,
   persistSessionTranscriptTurn,
   upsertSessionEntryCore,
 } from "../config/sessions/session-accessor.js";
-import * as canonicalWorker from "../config/sessions/session-accessor.sqlite-canonical-worker-pool.js";
 import {
   resolveSqliteReadScope,
   toDatabaseOptions,
@@ -24,8 +22,6 @@ import * as gatewayLock from "../infra/gateway-lock.js";
 import * as gatewayOwner from "../infra/gateway-owner-lease.js";
 import * as stateOwner from "../infra/gateway-state-owner.js";
 import * as nodeSqlite from "../infra/node-sqlite.js";
-import { hasPersistedOpenClawAgentCanonicalValidation } from "../state/openclaw-agent-canonical-validation-receipt.js";
-import { withOpenClawAgentDatabaseReadOnly } from "../state/openclaw-agent-db-readonly.js";
 import {
   closeOpenClawAgentDatabasesAsync,
   closeOpenClawAgentDatabasesForTest,
@@ -63,7 +59,7 @@ function makeLog() {
 
 describe("runStartupSessionMaintenanceForTest", () => {
   it.each([1, 2])(
-    "admits the first session after certifying %i cold empty agent databases once",
+    "admits the first session on %i cold empty agent databases without deferred validation",
     async (agentCount) => {
       const stateDir = fs.realpathSync.native(tempDirs.make("openclaw-small-startup-"));
       const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
@@ -77,37 +73,22 @@ describe("runStartupSessionMaintenanceForTest", () => {
       for (const agentId of agentIds) {
         openOpenClawAgentDatabase({ agentId, env });
       }
-      const started = vi.spyOn(canonicalWorker, "startCanonicalValidationTask");
-      try {
-        for (let boot = 0; boot < 2; boot++) {
-          await closeOpenClawAgentDatabasesAsync();
-          closeOpenClawAgentDatabasesForTest(stateDir);
-          started.mockClear();
-          const log = makeLog();
-          await runStartupSessionMaintenanceForTest({ cfg, env, log });
-          for (const agentId of agentIds) {
-            const read = withCanonicalSessionValidationDeferral(() =>
-              loadExactSessionEntryReadOnly({
-                agentId,
-                env,
-                sessionKey: `agent:${agentId}:first-turn`,
-              }),
-            );
-            expect(read).toEqual({ kind: "complete", value: undefined });
-            expect(
-              withOpenClawAgentDatabaseReadOnly(hasPersistedOpenClawAgentCanonicalValidation, {
-                agentId,
-                env,
-              }),
-            ).toMatchObject({ found: true, value: true });
-          }
-          expect(started.mock.calls.map(([, options]) => options.agentId).toSorted()).toEqual(
-            boot === 0 ? agentIds : [],
+      for (let boot = 0; boot < 2; boot++) {
+        await closeOpenClawAgentDatabasesAsync();
+        closeOpenClawAgentDatabasesForTest(stateDir);
+        const log = makeLog();
+        await runStartupSessionMaintenanceForTest({ cfg, env, log });
+        for (const agentId of agentIds) {
+          const read = withCanonicalSessionValidationDeferral(() =>
+            loadExactSessionEntryReadOnly({
+              agentId,
+              env,
+              sessionKey: `agent:${agentId}:first-turn`,
+            }),
           );
-          expect(log.warn).not.toHaveBeenCalled();
+          expect(read).toEqual({ kind: "complete", value: undefined });
         }
-      } finally {
-        started.mockRestore();
+        expect(log.warn).not.toHaveBeenCalled();
       }
     },
   );
@@ -130,7 +111,6 @@ describe("runStartupSessionMaintenanceForTest", () => {
       await closeOpenClawAgentDatabasesAsync();
       closeOpenClawAgentDatabasesForTest();
       await runStartupSessionMaintenanceForTest({ cfg, env, log: makeLog() });
-      const started = vi.spyOn(canonicalWorker, "startCanonicalValidationTask");
       const open = vi.spyOn(nodeSqlite, "openNodeSqliteDatabase");
       const lifecycle = vi
         .spyOn(stateOwner, "hasActiveGatewayStateOwner")
@@ -159,7 +139,6 @@ describe("runStartupSessionMaintenanceForTest", () => {
           open.mockClear();
           const log = makeLog();
           await runStartupSessionMaintenanceForTest({ cfg, env, log });
-          expect(started).not.toHaveBeenCalled();
           expect(log.warn).not.toHaveBeenCalled();
           expect(
             open.mock.calls.filter(
@@ -171,7 +150,6 @@ describe("runStartupSessionMaintenanceForTest", () => {
           ).toEqual([]);
         }
       } finally {
-        started.mockRestore();
         open.mockRestore();
         lifecycle.mockRestore();
         lock.mockRestore();
@@ -388,43 +366,6 @@ describe("runStartupSessionMaintenanceForTest", () => {
     },
   );
 
-  it.each(["configured", "retired-root"] as const)(
-    "preserves the %s legacy source until a configured Doctor import",
-    async (layout) => {
-      const stateDir = fs.realpathSync.native(tempDirs.make("openclaw-legacy-session-startup-"));
-      const env = { OPENCLAW_STATE_DIR: stateDir, OPENCLAW_PROFILE: "migration" };
-      const storePath =
-        layout === "configured"
-          ? path.join(stateDir, "custom", "sessions.json")
-          : path.join(stateDir, "sessions", "sessions.json");
-      const cfg: OpenClawConfig = {
-        agents: { entries: { main: {} } },
-        ...(layout === "configured" ? { session: { store: storePath } } : {}),
-      };
-      const original = JSON.stringify({
-        "agent:main:legacy": { sessionId: "legacy-session", updatedAt: 1 },
-      });
-      fs.mkdirSync(path.dirname(storePath), { recursive: true });
-      fs.writeFileSync(storePath, original);
-
-      if (layout === "retired-root") {
-        await expect(
-          runStartupSessionMaintenanceForTest({ cfg, env, log: makeLog() }),
-        ).resolves.toBeUndefined();
-        cfg.session = { store: storePath };
-      }
-      await expect(
-        runStartupSessionMaintenanceForTest({ cfg, env, log: makeLog() }),
-      ).rejects.toThrow("openclaw --profile migration doctor --fix");
-      expect(fs.readFileSync(storePath, "utf8")).toBe(original);
-      expect(fs.existsSync(path.join(stateDir, "session-sqlite-migration-runs"))).toBe(false);
-
-      const imported = await runDoctorSessionSqlite({ cfg, env, allAgents: true, mode: "import" });
-      expect(imported.totals.importedEntries).toBe(1);
-      expect(imported.totals.archivedLegacyStoreFiles).toBe(1);
-      await expect(
-        runStartupSessionMaintenanceForTest({ cfg, env, log: makeLog() }),
-      ).resolves.toBeUndefined();
-    },
-  );
+  // NakedClaw: startup no longer refuses a legacy sessions.json; only Doctor imports
+  // older state (nakedclaw skill, assumptions 1 and 6).
 });

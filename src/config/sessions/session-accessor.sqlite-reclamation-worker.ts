@@ -1,16 +1,11 @@
 import path from "node:path";
 import { sqliteReaderDatabasePathKey } from "../../infra/sqlite-reader-lifecycle.js";
 import { assertExistingDatabaseIdentity } from "../../infra/sqlite-worker-identity.js";
-import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import type { OpenClawAgentDatabaseClaim } from "../../state/openclaw-agent-db-identity.js";
 import { registerOpenClawAgentDatabaseAsyncResource } from "../../state/openclaw-agent-db-lifecycle.js";
 import { runOutsideOpenClawDatabaseMaintenanceScope } from "../../state/openclaw-state-db-async-lifecycle.js";
 import { runExclusiveSqliteTranscriptArchiveWorker } from "./session-accessor.sqlite-archive.js";
-import {
-  captureCanonicalValidationWorkerPool,
-  type CanonicalWorkerPool,
-} from "./session-accessor.sqlite-canonical-worker-pool.js";
 import type { SqliteSessionReclamationPlan } from "./session-accessor.sqlite-lifecycle-types.js";
 import { SqliteReclamationWorker } from "./session-accessor.sqlite-reclamation-worker-lifetime.js";
 import type {
@@ -21,9 +16,8 @@ import type {
 type DatabaseOptions = SqliteSessionReclamationPlan["databaseOptions"];
 type ReclamationWorkerSlot = {
   worker?: SqliteReclamationWorker;
-  execution?: CanonicalWorkerPool;
-  retain?: (worker: SqliteReclamationWorker) => void;
-  retire?: (worker: SqliteReclamationWorker) => void;
+  retain: (worker: SqliteReclamationWorker) => void;
+  retire: (worker: SqliteReclamationWorker) => void;
   alias?: string;
 };
 const retained = resolveGlobalSingleton(
@@ -72,14 +66,6 @@ function releaseWorkerAliases(worker: SqliteReclamationWorker): void {
   }
   retainedAliases.delete(worker);
 }
-
-export type ClaimedReclamationWorkerUse = <T>(
-  options: DatabaseOptions,
-  claim: SqliteReclamationClaim,
-  run: (worker: SqliteReclamationWorker) => Promise<T>,
-  assertRequestCurrent: () => void,
-  signal?: AbortSignal,
-) => Promise<T>;
 
 /**
  * The global archive FIFO bounds ordinary reclamation's whole-buffer heaps.
@@ -130,32 +116,6 @@ export function withSqliteReclamationWorker<T>(
   }, signal);
 }
 
-/** Startup bounds these scopes; each keeps one worker through certification and native close. */
-export async function withSqliteCanonicalValidationWorker<T>(
-  run: (withWorker: ClaimedReclamationWorkerUse) => Promise<T>,
-): Promise<T> {
-  const slot: ReclamationWorkerSlot = { execution: captureCanonicalValidationWorkerPool() };
-  const queue = new KeyedAsyncQueue();
-  let closed = false;
-  try {
-    return await run((options, claim, consume, assertCurrent) =>
-      queue.enqueue("canonical-validation", () => {
-        if (closed) {
-          throw new Error("Canonical validation Worker scope is closed");
-        }
-        return useReclamationWorker(slot, options, claim.identity, consume, assertCurrent, () =>
-          claim.assertCurrent(),
-        );
-      }),
-    );
-  } finally {
-    closed = true;
-    await queue.enqueue("canonical-validation", async () => {
-      await slot.worker?.close("exclusive-handoff");
-    });
-  }
-}
-
 async function useReclamationWorker<T>(
   slot: ReclamationWorkerSlot,
   options: DatabaseOptions,
@@ -174,10 +134,9 @@ async function useReclamationWorker<T>(
   const worker = (slot.worker ??= new SqliteReclamationWorker(
     options,
     expectedIdentity,
-    slot.execution,
     slot.retire,
   ));
-  slot.retain?.(worker);
+  slot.retain(worker);
   try {
     if (slot.alias !== undefined) {
       retainWorkerAlias(worker, options, slot.alias);

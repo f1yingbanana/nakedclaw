@@ -6,7 +6,7 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { MessagePort, parentPort, threadId, workerData } from "node:worker_threads";
+import { parentPort, workerData } from "node:worker_threads";
 import zlib from "node:zlib";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
@@ -42,11 +42,6 @@ import type {
   TranscriptArchiveWorkerPlan,
   TranscriptArchiveWorkerResult,
 } from "./session-accessor.sqlite-archive-types.js";
-import type {
-  SqliteCanonicalValidationTaskMessage,
-  SqliteCanonicalValidationTaskResult,
-  SqliteCanonicalValidationWorkerTask,
-} from "./session-accessor.sqlite-canonical-worker-pool.js";
 import {
   planSessionStateDeleteIfUnreferenced,
   readSessionStateDeleteSnapshot,
@@ -459,40 +454,7 @@ if (isRecord(workerData) && workerData.type === "sqlite-transcript-archive-v2") 
   // Every mode returns results over IPC; lease cleanup diagnostics must preserve CLI JSON stdout.
   routeLogsToStderr();
   const operation = workerData.operation;
-  if (operation === "canonical-validation-pool") {
-    const { serveWorkerTasks } = await import("../../infra/worker-task-server.js");
-    const { runReclamationWorkerPort } =
-      await import("./session-accessor.sqlite-mutation-worker.runtime.js");
-    // Coordination actor IDs remain unique even when the previous task retained failed cleanup.
-    const taskSequence = { operationId: 0 };
-    serveWorkerTasks<SqliteCanonicalValidationTaskResult>(async (value, channel) => {
-      // SAFETY: the matching pool owns the typed private task and its transferred port.
-      const task = value as SqliteCanonicalValidationWorkerTask;
-      try {
-        if (!(task?.port instanceof MessagePort) || !channel) {
-          throw new Error("Canonical validation task requires its own message port");
-        }
-        task.port.postMessage(
-          {
-            type: "ready",
-            threadId,
-            operationId: taskSequence.operationId,
-          } satisfies SqliteCanonicalValidationTaskMessage,
-          [],
-        );
-        await runReclamationWorkerPort(task.port, task.databaseOptions, taskSequence);
-        channel.consumeInput();
-        return { status: "closed" };
-      } catch (error) {
-        return {
-          status: "failed",
-          error: error instanceof Error ? error.message : String(error),
-        };
-      } finally {
-        task?.port?.close();
-      }
-    });
-  } else if (operation === "archive-session") {
+  if (operation === "archive-session") {
     // SAFETY: the parent captures the state root before entering the scoped FIFO.
     const data = workerData as { env: NodeJS.ProcessEnv };
     await runArchiveSession(parentPort, data.env);

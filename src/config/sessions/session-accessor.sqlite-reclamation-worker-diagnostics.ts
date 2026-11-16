@@ -12,7 +12,6 @@ const SLOW_RECLAMATION_WORKER_MS = 1_000;
 export type SqliteReclamationWorkerRetirementReason =
   | "matches-mismatch"
   | "revoked"
-  | "exclusive-handoff"
   | "idle-ttl"
   | "failure"
   | "pressure";

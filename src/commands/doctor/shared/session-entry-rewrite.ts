@@ -24,23 +24,15 @@ import { stripRuntimeOnlySessionSkillsFields } from "../../../config/sessions/st
 import { assertSupportedSessionStoreEntry } from "../../../config/sessions/supported-session-store.js";
 import type { SessionEntry } from "../../../config/sessions/types.js";
 import { executeSqliteQuerySync, iterateSqliteQuerySync } from "../../../infra/kysely-sync.js";
-import {
-  assertExistingDatabaseIdentity,
-  readDatabasePathIdentitySync,
-  type DatabaseFileIdentity,
-} from "../../../infra/sqlite-worker-identity.js";
+import type { DatabaseFileIdentity } from "../../../infra/sqlite-worker-identity.js";
 import { assertOpenClawAgentDatabaseIdentity } from "../../../state/openclaw-agent-db-identity.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../../state/openclaw-agent-db-readonly.js";
-import {
-  runOpenClawAgentWriteTransaction,
-  withOpenClawAgentDatabaseAsync,
-} from "../../../state/openclaw-agent-db.js";
+import { runOpenClawAgentWriteTransaction } from "../../../state/openclaw-agent-db.js";
 import { chunkItems } from "../../../utils/chunk-items.js";
 import {
   deliveryContextFromSession,
   sessionDeliveryChannel,
 } from "../../../utils/delivery-context.read.js";
-import { migrateLegacySessionRunOutcome } from "./session-entry-shape.js";
 
 const DOCTOR_SESSION_REWRITE_BATCH_SIZE = 64;
 
@@ -83,47 +75,6 @@ export function scanDoctorSessionEntryRecords(
   if (!result.found) {
     throw new Error(`Session database unavailable during raw state inspection: ${result.reason}`);
   }
-}
-
-/** Startup normalizes legacy outcomes before canonical reads; clean stores stay read-only. */
-export async function repairLegacySessionRunOutcomes(
-  scope: DoctorSessionScanScope,
-  assertCurrent: () => void,
-): Promise<number> {
-  assertCurrent();
-  const expectedIdentity = readDatabasePathIdentitySync(scope.storePath);
-  const sessionKeys: string[] = [];
-  scanDoctorSessionEntryRecords(
-    scope,
-    ({ entry, sessionKey }) => {
-      if (entry.status === "running" || entry.status === "queued") {
-        sessionKeys.push(sessionKey);
-      }
-    },
-    expectedIdentity,
-  );
-  assertCurrent();
-  return sessionKeys.length === 0
-    ? 0
-    : withOpenClawAgentDatabaseAsync(
-        toDatabaseOptions(resolveSqliteScope({ ...scope, sessionKey: "" })),
-        () =>
-          rewriteDoctorSessionEntries({
-            scope,
-            sessionKeys,
-            rawTransform: migrateLegacySessionRunOutcome,
-            expectedIdentity,
-            assertCurrent,
-          }),
-        () => {
-          assertCurrent();
-          assertExistingDatabaseIdentity(
-            scope.storePath,
-            expectedIdentity.key,
-            expectedIdentity.birthtime,
-          );
-        },
-      );
 }
 
 /** Rewrites bounded entry batches after rereading each authoritative row inside its commit. */

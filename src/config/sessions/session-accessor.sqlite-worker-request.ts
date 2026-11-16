@@ -257,15 +257,8 @@ export function runSqliteMutationWorkerRequest<Result>(params: {
     };
     const ended = (ending: SqliteMutationWorkerEnd) =>
       runInOperationContext(() => {
-        if (ending.kind === "native-exit") {
-          params.onExit?.(ending.code);
-          finish(ending.code);
-        } else {
-          if (ending.kind === "task-failed") {
-            transportError ??= ending.error;
-          }
-          finish();
-        }
+        params.onExit?.(ending.code);
+        finish(ending.code);
       });
     // Worker events inherit its first caller; each request must retain its own authority context.
     const receiveInOperationContext = (message: SqliteMutationWorkerMessage<Result>) => {

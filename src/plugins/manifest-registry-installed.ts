@@ -16,7 +16,10 @@ import { listBundledSourceOverlayDirs } from "./bundled-source-overlays.js";
 import { recordPluginCandidateInstallOwner } from "./candidate-install-owner.js";
 import { discoverConfiguredPluginLoadPaths, type PluginCandidate } from "./discovery.js";
 import { shouldRejectHardlinkedPluginFiles } from "./hardlink-policy.js";
-import { getInstalledPluginIndexFacts } from "./installed-plugin-index-facts.js";
+import {
+  getInstalledPluginIndexAdmissionOverlayBase,
+  getInstalledPluginIndexFacts,
+} from "./installed-plugin-index-facts.js";
 import { hashStableJson } from "./installed-plugin-index-hash.js";
 import {
   isInstalledPluginIndexInstallOwnerAmbiguous,
@@ -63,6 +66,10 @@ type InstalledPackageMetadata = {
 export function resolveInstalledManifestRegistryIndexFingerprint(
   index: InstalledPluginIndex,
 ): string {
+  const base = getInstalledPluginIndexAdmissionOverlayBase(index);
+  if (base) {
+    return resolveInstalledManifestRegistryIndexFingerprint(base);
+  }
   const facts = getInstalledPluginIndexFacts(index);
   const cached = facts?.fingerprint;
   if (cached) {

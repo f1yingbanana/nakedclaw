@@ -3,6 +3,7 @@ import { isPathInside } from "../infra/path-guards.js";
 import { isDeeplyFrozenPlainData } from "../shared/immutable-data.js";
 import { isArtifactPreservingStateRead } from "../state/openclaw-state-db-readonly.js";
 import { resolveActivePluginInstallRoots } from "./install-root-context.js";
+import { recordInstalledPluginIndexAdmissionOverlay } from "./installed-plugin-index-facts.js";
 import { resolveInstalledPluginIndexInstallOwner } from "./installed-plugin-index-install-owner.js";
 import type {
   InstalledPluginIndex,
@@ -197,7 +198,7 @@ export function overlayPluginNativeAdmissions(
   if (!state || state.receipts.size === 0) {
     return index;
   }
-  return {
+  const overlay: InstalledPluginIndex = {
     ...index,
     plugins: index.plugins.map((record) => {
       const prefix = `${path.resolve(record.rootDir)}\0`;
@@ -213,6 +214,8 @@ export function overlayPluginNativeAdmissions(
         : record;
     }),
   };
+  recordInstalledPluginIndexAdmissionOverlay(overlay, index);
+  return overlay;
 }
 
 /** Seed the existing cache generation once from its admitted installed-index payload. */

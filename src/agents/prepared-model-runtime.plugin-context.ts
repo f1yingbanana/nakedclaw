@@ -13,6 +13,7 @@ import {
   setPluginRuntimeLoadContext,
 } from "../plugins/runtime/load-context.js";
 import { resolvePluginRuntimeLoadContext } from "../plugins/runtime/load-context.resolve.js";
+import { tryResolveConfiguredAgentWorkspaceDir } from "./agent-scope-config.js";
 import { createAgentRuntimeMetadataPluginIdScope } from "./harness/runtime-plugin-load-plan.js";
 import type { PreparedModelRuntimeInput } from "./prepared-model-runtime.types.js";
 
@@ -23,21 +24,38 @@ type PreparedPluginContextInput = Pick<
 
 const emptyPluginDiscovery: PluginDiscoveryResult = { candidates: [], diagnostics: [] };
 
+/**
+ * NakedClaw: the workspace an agent's plugins load for. Kazusa installs no plugin
+ * in a character's workspace; every plugin is global and resolves each agent's
+ * workspace from its id at call time (nakedclaw skill, assumption 6). In a world
+ * with a default workspace (every Kazusa world) every agent loads plugins for
+ * the Gateway's plugin workspace (`server-startup-plugins.ts`) and borrows its
+ * registry instead of loading one per agent. The agent's own workspace still
+ * goes to everything else (catalogs, sessions, tools).
+ */
+export function resolvePreparedPluginWorkspaceDir(
+  input: Pick<PreparedModelRuntimeInput, "config" | "workspaceDir">,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return input.config.agents?.defaults?.workspace?.trim()
+    ? (tryResolveConfiguredAgentWorkspaceDir(input.config, env) ?? input.workspaceDir)
+    : input.workspaceDir;
+}
+
 export function prepareOwnedPluginMetadataSnapshotParams(
   input: PreparedPluginContextInput,
   env: NodeJS.ProcessEnv,
 ): ResolvePluginMetadataSnapshotParams {
+  const workspaceDir = resolvePreparedPluginWorkspaceDir(input, env);
   return {
     config: input.config,
     env,
-    ...(input.workspaceDir
-      ? { workspaceDir: input.workspaceDir, allowWorkspaceScopedCurrent: true }
-      : {}),
-    ...(input.loadRuntimePlugins && input.runtimePluginSelections && input.workspaceDir
+    ...(workspaceDir ? { workspaceDir, allowWorkspaceScopedCurrent: true } : {}),
+    ...(input.loadRuntimePlugins && input.runtimePluginSelections && workspaceDir
       ? {
           pluginIdScope: createAgentRuntimeMetadataPluginIdScope({
             config: input.config,
-            workspaceDir: input.workspaceDir,
+            workspaceDir,
             selections: input.runtimePluginSelections,
           }),
         }
@@ -61,7 +79,8 @@ export function prepareOwnedPluginLoadContext(
     return metadataSnapshot;
   }
   const { config } = input;
-  const workspaceDir = metadataSnapshot.workspaceDir ?? input.workspaceDir;
+  const workspaceDir =
+    metadataSnapshot.workspaceDir ?? resolvePreparedPluginWorkspaceDir(input, env);
   const preparedActivation = getReusablePluginRuntimeActivation(preparedRegistry ?? registry, {
     config,
     env,

@@ -11,7 +11,10 @@ import {
   getPluginRuntimeLoadContext,
   getReusablePluginRuntimeActivation,
 } from "../plugins/runtime/load-context.js";
-import { prepareOwnedPluginLoadContext } from "./prepared-model-runtime.plugin-context.js";
+import {
+  prepareOwnedPluginLoadContext,
+  resolvePreparedPluginWorkspaceDir,
+} from "./prepared-model-runtime.plugin-context.js";
 import type { PreparedModelRuntimeBuildResources } from "./prepared-model-runtime.resources.js";
 import type {
   PreparedModelRuntimeInput,
@@ -35,7 +38,7 @@ function inboundRegistryIdentity(input: PreparedInboundRegistryInput): string {
   return JSON.stringify({
     config: hashRuntimeConfigValue(input.config),
     env: hashRuntimeConfigValue(input.env ?? process.env),
-    workspaceDir: input.workspaceDir,
+    workspaceDir: resolvePreparedPluginWorkspaceDir(input, input.env),
     allowGatewaySubagentBinding: input.allowGatewaySubagentBinding === true,
   });
 }
@@ -84,6 +87,7 @@ export function loadPreparedInboundPluginRegistry(
   configuredHarnessRuntimes?: readonly string[],
   onPrimaryRegistry?: (registry: PluginRegistry) => void,
 ): PluginRegistry {
+  const pluginWorkspaceDir = resolvePreparedPluginWorkspaceDir(input, input.env);
   const gatewayRegistry = resolveLendingGatewayRegistry(input, metadataSnapshot);
   // Registry-owned facts survive an outer reload cache without allowing stale
   // metadata or changed activation inputs to reuse already-registered callbacks.
@@ -106,7 +110,7 @@ export function loadPreparedInboundPluginRegistry(
       {
         config: input.config,
         env: input.env ?? process.env,
-        ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
+        ...(pluginWorkspaceDir ? { workspaceDir: pluginWorkspaceDir } : {}),
         ...(input.allowGatewaySubagentBinding ? { allowGatewaySubagentBinding: true } : {}),
         metadataSnapshot,
         preferBuiltPluginArtifacts: true,
@@ -179,6 +183,7 @@ export function prepareWorkspacePluginRegistries(
   if (input.readOnly && !input.loadRuntimePlugins && !input.runtimePluginSelections) {
     return {};
   }
+  const pluginWorkspaceDir = resolvePreparedPluginWorkspaceDir(input, input.env);
   // Resolve batch facts only for a registry load; read-only and reused registries need no scan.
   let primaryRegistry: PluginRegistry | undefined;
   const inboundPluginRegistry =
@@ -218,7 +223,7 @@ export function prepareWorkspacePluginRegistries(
             purpose: input.runtimePluginPurpose,
             config: input.config,
             env: input.env ?? process.env,
-            ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
+            ...(pluginWorkspaceDir ? { workspaceDir: pluginWorkspaceDir } : {}),
             ...(input.allowGatewaySubagentBinding ? { allowGatewaySubagentBinding: true } : {}),
             metadataSnapshot,
             ...(preferBuiltPluginArtifacts ? { preferBuiltPluginArtifacts: true } : {}),

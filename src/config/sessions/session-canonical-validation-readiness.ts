@@ -1,24 +1,14 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { isGatewayExternallySupervised } from "../../infra/gateway-supervision.js";
-import { runSqliteReadOperationSync } from "../../infra/sqlite-schema-facts.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import {
-  isOpenClawAgentDatabasePathCurrent,
-  readOpenClawAgentDatabaseIdentity,
-} from "../../state/openclaw-agent-db-identity.js";
-import { retainOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
-import {
-  getOpenClawAgentDatabaseValidation,
   getOpenClawAgentDatabaseValidationForTransfer,
   captureOpenClawAgentDatabaseValidationTransfer,
-  hasOpenClawAgentCanonicalValidation,
-  markOpenClawAgentCanonicalValidation,
 } from "../../state/openclaw-agent-db-validation-cache.js";
 import {
   isIncognitoOpenClawAgentSqlitePath,
   resolveOpenClawAgentSqlitePath,
-  type OpenClawAgentDatabaseOptions,
 } from "../../state/openclaw-agent-db.js";
 import { captureOpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution.js";
 import {
@@ -26,11 +16,7 @@ import {
   resolveOpenClawStateSqlitePath,
 } from "../../state/openclaw-state-db.paths.js";
 import { withSqliteReclamationAuthorization } from "./session-accessor.sqlite-reclamation-commit.js";
-import type { SqliteReclamationWorker } from "./session-accessor.sqlite-reclamation-worker-lifetime.js";
-import {
-  withSqliteReclamationWorker,
-  type ClaimedReclamationWorkerUse,
-} from "./session-accessor.sqlite-reclamation-worker.js";
+import { withSqliteReclamationWorker } from "./session-accessor.sqlite-reclamation-worker.js";
 import type { SqliteReclamationClaim } from "./session-accessor.sqlite-reclamation-worker.types.js";
 import { runExclusiveSqliteSessionWrite } from "./session-accessor.sqlite-scope.js";
 import {
@@ -38,7 +24,6 @@ import {
   type SqliteMutationWorkerValidationOwner,
 } from "./session-accessor.sqlite-worker-request.js";
 import type { PendingCanonicalValidation } from "./session-canonical-validation-deferral.js";
-import { hasPendingCanonicalSessionValidation } from "./session-canonical-validation.js";
 
 const MAX_BATCH_ROWS = 128;
 const MAX_BATCH_BYTES = 1024 * 1024;
@@ -47,107 +32,53 @@ const log = createSubsystemLogger("sessions/canonical-validation");
 // Share only active runtime drains; native close/reopen creates a different owner.
 const runtimeDrains = new Map<string, Promise<void>>();
 
-/** Runtime consumes captured pending work; startup and Doctor retain their native readiness probe. */
+/**
+ * Certifies the pending work a runtime session read or change captured.
+ * NakedClaw: startup no longer drains canonical validation and Doctor never
+ * called this, so the native readiness probe (plain options, an injected
+ * worker, an owner check) is gone; runtime callers always pass captured work
+ * (nakedclaw skill, assumptions 1 and 6).
+ */
 export async function certifySessionCanonicalValidationPending(
-  options: OpenClawAgentDatabaseOptions | PendingCanonicalValidation,
-  withWorker: ClaimedReclamationWorkerUse = withSqliteReclamationWorker,
-  assertCurrentOwner?: () => void,
+  pending: PendingCanonicalValidation,
 ): Promise<void> {
-  const pending = "source" in options ? options : undefined;
-  const assertOwnerCurrent = () => {
-    assertCurrentOwner?.();
-    pending?.assertStateCurrent();
-  };
+  const assertOwnerCurrent = () => pending.assertStateCurrent();
   assertOwnerCurrent();
-  const sourceEnv = options.env ?? process.env;
-  const pathname = resolveOpenClawAgentSqlitePath(options);
-  if (isIncognitoOpenClawAgentSqlitePath(pathname, options)) {
+  const sourceEnv = pending.env ?? process.env;
+  const pathname = resolveOpenClawAgentSqlitePath(pending);
+  if (isIncognitoOpenClawAgentSqlitePath(pathname, pending)) {
     return;
   }
-  // Startup and Doctor own their native probe. Runtime already discovered pending
-  // work and captured its physical source in the same synchronous read frame.
-  const retained = pending ? undefined : retainOpenClawAgentDatabaseReadOnly(options);
-  if (!pending && !retained?.found) {
-    return;
-  }
-  const native = retained?.found ? retained : undefined;
-  const database = native?.database;
-  let claim: SqliteReclamationClaim | undefined = native?.claim;
-  let validationOwner: SqliteMutationWorkerValidationOwner | undefined = native
-    ? { database: native.database, isCurrent: native.claim.isCurrent }
-    : undefined;
-  const source = pending?.source ?? (database && readOpenClawAgentDatabaseIdentity(database));
-  if (!source) {
-    throw new Error("Canonical validation requires its captured database source");
-  }
+  let claim: SqliteReclamationClaim | undefined;
+  let validationOwner: SqliteMutationWorkerValidationOwner | undefined;
+  const source = pending.source;
   const drainKey = source.incarnation;
-  let execution: ReturnType<typeof captureOpenClawAgentDatabaseExecution> | undefined;
+  let initializeCanonicalValidation = pending.initializeCanonicalValidation;
+  const databaseOptions = {
+    agentId: normalizeAgentId(pending.agentId),
+    path: source.canonicalPath,
+    env: {
+      OPENCLAW_STATE_DIR: resolveOpenClawStateDirForDatabasePath(
+        pending.database?.path ?? resolveOpenClawStateSqlitePath(sourceEnv),
+      ),
+      ...(isGatewayExternallySupervised(sourceEnv) ? { OPENCLAW_SUPERVISOR_MODE: "external" } : {}),
+    },
+  };
+  const readValidation = () => getOpenClawAgentDatabaseValidationForTransfer(databaseOptions);
+  const execution = captureOpenClawAgentDatabaseExecution(databaseOptions, {
+    expectedIdentity: {
+      kind: "file",
+      physicalIdentity: source.key.slice(5),
+      nativeLocation: source.canonicalPath,
+      birthtime: source.birthtime,
+    },
+    requestedPath: pathname,
+  });
   let oversizedRows = 0;
   try {
-    const readiness = database
-      ? runSqliteReadOperationSync(
-          database.db,
-          () => {
-            const initialize = !hasOpenClawAgentCanonicalValidation(database);
-            return {
-              initialize,
-              hasWork: initialize || hasPendingCanonicalSessionValidation(database),
-            };
-          },
-          "fresh",
-        )
-      : { initialize: pending!.initializeCanonicalValidation, hasWork: true };
-    if (!readiness.hasWork) {
-      return;
-    }
-    let initializeCanonicalValidation = readiness.initialize;
-    const databaseOptions = {
-      agentId: normalizeAgentId(options.agentId),
-      path: database ? readOpenClawAgentDatabaseIdentity(database).filename : source.canonicalPath,
-      env: {
-        OPENCLAW_STATE_DIR: resolveOpenClawStateDirForDatabasePath(
-          options.database?.path ?? resolveOpenClawStateSqlitePath(sourceEnv),
-        ),
-        ...(isGatewayExternallySupervised(sourceEnv)
-          ? { OPENCLAW_SUPERVISOR_MODE: "external" }
-          : {}),
-      },
-    };
-    const readValidation = () =>
-      database
-        ? getOpenClawAgentDatabaseValidation(database)
-        : getOpenClawAgentDatabaseValidationForTransfer(databaseOptions);
-    if (pending) {
-      execution = captureOpenClawAgentDatabaseExecution(databaseOptions, {
-        expectedIdentity: {
-          kind: "file",
-          physicalIdentity: pending.source.key.slice(5),
-          nativeLocation: pending.source.canonicalPath,
-          birthtime: pending.source.birthtime,
-        },
-        requestedPath: pathname,
-      });
-    }
-    const useWorker = <T>(
-      run: (worker: SqliteReclamationWorker) => Promise<T>,
-      assertCurrent: () => void,
-      signal: AbortSignal,
-    ) =>
-      pending
-        ? withSqliteReclamationWorker(
-            databaseOptions,
-            claim ?? pending.source,
-            run,
-            assertCurrent,
-            signal,
-            pathname,
-          )
-        : withWorker(databaseOptions, native!.claim, run, assertCurrent, signal);
     return await withSqliteMutationWorkerLifetime(
       databaseOptions,
       async ({ assertCurrent: assertReadinessCurrent }) => {
-        const shareRuntimeDrain =
-          withWorker === withSqliteReclamationWorker && assertCurrentOwner === undefined;
         const drain = async () => {
           let contendedBatches = 0;
           let validation = readValidation();
@@ -158,7 +89,9 @@ export async function certifySessionCanonicalValidationPending(
             const result = await withSqliteMutationWorkerLifetime(
               databaseOptions,
               async ({ assertCurrent, commitGate, signal }) =>
-                await useWorker(
+                await withSqliteReclamationWorker(
+                  databaseOptions,
+                  claim ?? source,
                   async (worker) => {
                     if (!claim) {
                       const receiveValidation =
@@ -166,11 +99,11 @@ export async function certifySessionCanonicalValidationPending(
                       const assertOpeningCurrent = () => {
                         assertOwnerCurrent();
                         assertReadinessCurrent();
-                        execution!.assertCurrent();
+                        execution.assertCurrent();
                       };
                       const prepared = await worker.prepare({
                         plan: { kind: "canonical-validation" },
-                        expectedSource: pending!.source,
+                        expectedSource: source,
                         assertCurrent: assertOpeningCurrent,
                         commitGate,
                         onCommitRequest: () => {
@@ -211,7 +144,7 @@ export async function certifySessionCanonicalValidationPending(
                       assertOwnerCurrent();
                       assertReadinessCurrent();
                       assertCurrent();
-                      execution?.assertCurrent();
+                      execution.assertCurrent();
                       worker.assertCurrent(databaseOptions, currentClaim);
                       if (validation && readValidation() !== validation) {
                         throw new Error("Canonical validation admission changed");
@@ -220,7 +153,7 @@ export async function certifySessionCanonicalValidationPending(
                     assertCommitAllowed();
                     return await withSqliteReclamationAuthorization(
                       commitGate,
-                      database?.db ?? databaseOptions.path,
+                      databaseOptions.path,
                       assertCommitAllowed,
                       (authorize) =>
                         worker.runCanonicalValidation({
@@ -256,10 +189,11 @@ export async function certifySessionCanonicalValidationPending(
                     assertOwnerCurrent();
                     assertReadinessCurrent();
                     assertCurrent();
-                    execution?.assertCurrent();
+                    execution.assertCurrent();
                     claim?.assertCurrent();
                   },
                   signal,
+                  pathname,
                 ),
             );
             assertOwnerCurrent();
@@ -272,13 +206,6 @@ export async function certifySessionCanonicalValidationPending(
             validation ??= currentValidation;
             oversizedRows += result.oversizedRows;
             if (!result.hasMore) {
-              if (
-                database &&
-                (!isOpenClawAgentDatabasePathCurrent(database) ||
-                  !markOpenClawAgentCanonicalValidation(database))
-              ) {
-                throw new Error("SQLite session reclamation database owner is no longer current");
-              }
               return;
             }
             if (initializeCanonicalValidation) {
@@ -300,28 +227,23 @@ export async function certifySessionCanonicalValidationPending(
         try {
           assertOwnerCurrent();
           assertReadinessCurrent();
-          execution?.assertCurrent();
+          execution.assertCurrent();
           claim?.assertCurrent();
-          completion = shareRuntimeDrain ? runtimeDrains.get(drainKey) : undefined;
+          completion = runtimeDrains.get(drainKey);
           ownsDrain = completion === undefined;
           if (!completion) {
             completion = drain();
-            if (shareRuntimeDrain) {
-              runtimeDrains.set(drainKey, completion);
-            }
+            runtimeDrains.set(drainKey, completion);
           }
           await completion;
           assertOwnerCurrent();
           assertReadinessCurrent();
-          execution?.assertCurrent();
+          execution.assertCurrent();
           claim?.assertCurrent();
           const currentValidation = readValidation();
           if (
-            database
-              ? !isOpenClawAgentDatabasePathCurrent(database) ||
-                !hasOpenClawAgentCanonicalValidation(database)
-              : !currentValidation ||
-                Atomics.load(new Int32Array(currentValidation.canonicalReady), 0) !== 1
+            !currentValidation ||
+            Atomics.load(new Int32Array(currentValidation.canonicalReady), 0) !== 1
           ) {
             throw new Error("SQLite session reclamation database owner is no longer current");
           }
@@ -329,14 +251,12 @@ export async function certifySessionCanonicalValidationPending(
           if (ownsDrain && runtimeDrains.get(drainKey) === completion) {
             runtimeDrains.delete(drainKey);
           }
-          native?.claim.release();
-          await execution?.release();
+          await execution.release();
         }
       },
     );
   } finally {
-    native?.claim.release();
-    await execution?.release();
+    await execution.release();
     if (oversizedRows > 0) {
       log.warn("Canonical session validation processed oversized rows in its Worker", {
         path: pathname,

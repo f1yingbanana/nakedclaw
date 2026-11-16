@@ -4,9 +4,15 @@ import { afterEach, expect, it, vi } from "vitest";
 import * as archiveWorker from "../config/sessions/session-accessor.sqlite-archive.js";
 import { ensureSessionEntrySync } from "../config/sessions/session-accessor.sqlite-initial-entry.js";
 import { markCanonicalSessionValidationPending } from "../config/sessions/session-canonical-key.js";
+import {
+  deferCanonicalSessionValidation,
+  withCanonicalSessionValidationDeferral,
+} from "../config/sessions/session-canonical-validation-deferral.js";
 import * as readiness from "../config/sessions/session-canonical-validation-readiness.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { retainOpenClawAgentDatabaseReadOnly } from "../state/openclaw-agent-db-readonly.js";
+import { hasOpenClawAgentCanonicalValidation } from "../state/openclaw-agent-db-validation-cache.js";
 import {
   closeOpenClawAgentDatabaseByPathAsync,
   openOpenClawAgentDatabase,
@@ -18,9 +24,25 @@ import { sessionSubscriptionHandlers } from "./server-methods/sessions-subscript
 import type { GatewayRequestContext, GatewayRequestHandler } from "./server-methods/types.js";
 import { retainSessionListForegroundWork } from "./session-projection-work.js";
 import { bindSessionRowProjection } from "./session-row-projection-access.js";
-import * as rowFacts from "./session-row-projection-read.js";
 import { createSessionRowProjection } from "./session-row-projection.js";
 import { sharingPolicyClient } from "./session-sharing.test-utils.js";
+
+/** Captures main's pending validation the way a runtime session read does. */
+function captureMainValidationPending() {
+  const retained = retainOpenClawAgentDatabaseReadOnly({ agentId: "main" });
+  if (!retained.found) {
+    throw new Error("expected main's database");
+  }
+  // The reader stays open, as a runtime read's does, so later reads share its drain.
+  const { database } = retained;
+  const captured = withCanonicalSessionValidationDeferral(() =>
+    deferCanonicalSessionValidation(database, !hasOpenClawAgentCanonicalValidation(database)),
+  );
+  if (captured.kind !== "pending") {
+    throw new Error("expected pending canonical validation");
+  }
+  return captured.database;
+}
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -129,13 +151,11 @@ it("authorizes exact rows independently of bulk validation and fences corrupt su
     }
     database.db.exec("UPDATE session_nodes SET entry_valid = 1; COMMIT");
     markCanonicalSessionValidationPending(database);
-    await readiness.certifySessionCanonicalValidationPending({ agentId: "main" });
+    await readiness.certifySessionCanonicalValidationPending(captureMainValidationPending());
     const releaseForeground = retainSessionListForegroundWork();
     const projection = await createSessionRowProjection({ cfg: {}, modelCatalog: [] });
     const work: Promise<unknown>[] = [];
     const bulkEntered = createDeferredCore();
-    const rowEntered = createDeferredCore();
-    const releaseRow = createDeferredCore();
     const joinedBulk = createDeferredCore<string>();
     let resumeBulk: (() => void) | undefined;
     try {
@@ -172,7 +192,7 @@ it("authorizes exact rows independently of bulk validation and fences corrupt su
         });
         return worker;
       });
-      work.push(readiness.certifySessionCanonicalValidationPending({ agentId: "main" }));
+      work.push(readiness.certifySessionCanonicalValidationPending(captureMainValidationPending()));
       await bulkEntered.promise;
       const certify = readiness.certifySessionCanonicalValidationPending;
       vi.spyOn(readiness, "certifySessionCanonicalValidationPending").mockImplementation(
@@ -181,12 +201,6 @@ it("authorizes exact rows independently of bulk validation and fences corrupt su
           return certify(...args);
         },
       );
-      const readFacts = rowFacts.withSessionRowDatabaseFacts;
-      vi.spyOn(rowFacts, "withSessionRowDatabaseFacts").mockImplementation(async (...args) => {
-        rowEntered.resolve();
-        await releaseRow.promise;
-        return readFacts(...args);
-      });
       const subscribeSessionMessageEvents = vi.fn();
       const context = bindSessionRowProjection(
         {
@@ -238,29 +252,19 @@ it("authorizes exact rows independently of bulk validation and fences corrupt su
         parse.mock.calls.filter(([json]) => json.includes('"sessionId":"dirty-')),
       ).toHaveLength(0);
       parse.mockRestore();
-      let dirtySettled = false;
-      const dirty = authorize("agent:main:dirty-0").then((result) => {
-        dirtySettled = true;
-        return result;
-      });
-      const revokedClient = sharingPolicyClient({
-        user: "reader",
-        scopes: ["operator.sessions.read"],
-      });
+      // NakedClaw: a per-session change no longer refreshes the row in the
+      // background (fork commit 08b72f48689, "materialize session rows on read"),
+      // so there is no row read to hold here; scope and availability are set up
+      // front instead of revoked while the read is held.
+      const dirty = authorize("agent:main:dirty-0");
+      const revokedClient = sharingPolicyClient({ user: "reader", scopes: [] });
       const revoked = authorize("agent:main:dirty-0", revokedClient);
-      const unavailableGatewayMethods = new Set<string>();
+      const unavailableGatewayMethods = new Set(["sessions.messages.subscribe"]);
       const unavailable = authorize(
         "agent:main:dirty-0",
         client,
         bindSessionRowProjection({ ...context, unavailableGatewayMethods }, () => projection),
       );
-      expect(await Promise.race([rowEntered.promise.then(() => "row"), joinedBulk.promise])).toBe(
-        "row",
-      );
-      expect(dirtySettled).toBe(false);
-      revokedClient.connect.scopes = [];
-      unavailableGatewayMethods.add("sessions.messages.subscribe");
-      releaseRow.resolve();
       expect(await Promise.race([dirty, joinedBulk.promise])).toMatchObject({ error: null });
       expect(await revoked).toMatchObject({ error: { code: "FORBIDDEN" } });
       expect(await unavailable).toMatchObject({ error: { code: "UNAVAILABLE" } });
@@ -294,7 +298,6 @@ it("authorizes exact rows independently of bulk validation and fences corrupt su
       ).rejects.toThrow("invalid persisted session row");
       expect(subscribeSessionMessageEvents).not.toHaveBeenCalled();
     } finally {
-      releaseRow.resolve();
       const current = openOpenClawAgentDatabase({ agentId: "main" });
       current.db.exec(
         "UPDATE session_nodes SET parent_session_key = NULL WHERE session_key = 'agent:main:dirty-0'",

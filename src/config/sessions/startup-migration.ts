@@ -32,7 +32,6 @@ import {
 import { runTasksWithConcurrency } from "../../utils/run-with-concurrency.js";
 import { cloneEnvWithPlatformSemantics } from "../config-env-vars.js";
 import type { OpenClawConfig } from "../types.openclaw.js";
-import { migrateLegacyMainSessionKeys } from "./legacy-main-session-migration.js";
 import {
   isLegacySessionRecordOwnedByTarget,
   listLegacySessionTranscriptFiles,
@@ -219,7 +218,6 @@ export async function runSessionStartupMigration(params: {
   log: SessionStartupMigrationLogger;
   handoffDatabase?: (database: OpenClawAgentDatabaseOptions) => Promise<void>;
   deps?: {
-    migrateLegacyMainSessionKeys?: typeof migrateLegacyMainSessionKeys;
     resolveAllAgentSessionStoreTargetsSync?: typeof resolveAllAgentSessionStoreTargetsSync;
   };
 }): Promise<void> {
@@ -235,32 +233,11 @@ export async function runSessionStartupMigration(params: {
         !readAgentDatabaseAdmissionRefusal(target.agentId, { env }),
     );
   const targets = admittedTargets();
-  // Stable installations may still have file-backed history. Only Doctor imports it;
-  // do not serve an empty SQLite history or rewrite those files during startup.
-  assertSessionStoreMigrationComplete({ cfg: params.cfg, env, targets });
-  const { assertAcpSessionKeysMigratedForStartup, assertEmbeddedAcpMetadataMigratedForStartup } =
-    await import("../../acp/runtime/session-meta-startup.js");
-  if (!params.agentIds) {
-    await assertAcpSessionKeysMigratedForStartup(
-      params.cfg,
-      env,
-      targets.map((target) => target.agentId),
-      undefined,
-      params.assertCurrent,
-    );
-  }
-  const migrateLegacyMain =
-    params.deps?.migrateLegacyMainSessionKeys ?? migrateLegacyMainSessionKeys;
-  const result = await migrateLegacyMain({ cfg: params.cfg, env, mode: "detect" });
-  params.assertCurrent?.();
-  if (result.warnings.length > 0) {
-    params.log.warn(
-      `session: retired main-agent session migration warnings:\n${result.warnings.map((warning) => `- ${warning}`).join("\n")}`,
-    );
-  }
-
+  // NakedClaw: a Kazusa world is created on this version and only Doctor, with
+  // the Gateway stopped, ever imports older state (nakedclaw skill, assumptions 1
+  // and 6). The file-store, ACP-key, legacy main-key and legacy run-outcome
+  // checks that ran here for every agent at every start are gone.
   const databases = new Set<string>();
-  let interruptedSessions = 0;
   const registeredDatabases = new Set(
     listOpenClawRegisteredAgentDatabases({ env }).map((entry) => `${entry.agentId}\0${entry.path}`),
   );
@@ -319,8 +296,6 @@ export async function runSessionStartupMigration(params: {
     let alreadyOpen: boolean | undefined;
     let handedOff = false;
     try {
-      const { repairLegacySessionRunOutcomes } =
-        await import("../../commands/doctor/shared/session-entry-rewrite.js");
       if (
         !(await runUnlessDeleted(async () => {
           alreadyOpen = isOpenClawAgentDatabaseOpen(databasePath);
@@ -342,44 +317,16 @@ export async function runSessionStartupMigration(params: {
               `session: SQLite startup maintenance failed for ${target.agentId}; continuing: ${String(error)}`,
             );
           }
-          interruptedSessions += await repairLegacySessionRunOutcomes(
-            { agentId: options.agentId, env, storePath: databasePath },
-            () => params.assertCurrent?.(),
-          );
         }))
       ) {
         return;
       }
-      // Canonical refusal is readiness failure. Drain before runtime visitors can
-      // otherwise parse a whole migrated store on the main thread.
-      const { certifySessionCanonicalValidationPending } =
-        await import("./session-canonical-validation-readiness.js");
-      const { withSqliteCanonicalValidationWorker } =
-        await import("./session-accessor.sqlite-reclamation-worker.js");
-      params.assertCurrent?.();
-      if (
-        !(await runUnlessDeleted(() =>
-          withSqliteCanonicalValidationWorker((withWorker) =>
-            certifySessionCanonicalValidationPending(options, withWorker, params.assertCurrent),
-          ),
-        ))
-      ) {
-        return;
-      }
-      params.assertCurrent?.();
-      await runUnlessDeleted(async () => {
-        params.assertCurrent?.();
-        if (params.agentIds) {
-          await assertAcpSessionKeysMigratedForStartup(
-            params.cfg,
-            env,
-            targets.map((admittedTarget) => admittedTarget.agentId),
-            options,
-            params.assertCurrent,
-          );
-        }
-        assertEmbeddedAcpMetadataMigratedForStartup(options);
-      });
+      // NakedClaw: the canonical-validation receipt is not renewed here, so a
+      // start no longer waits on a worker per agent. A database without a
+      // receipt (a copied or restored world, or one that was empty when last
+      // certified) is validated at its first session read or change: on the main
+      // thread, or by a worker that records the receipt on the Gateway's
+      // session-row and request paths.
       const handoffDatabase = params.handoffDatabase;
       if (handoffDatabase) {
         // Runtime readiness failures must propagate; only successful handoff
@@ -396,22 +343,13 @@ export async function runSessionStartupMigration(params: {
       }
     }
   });
-  // Share preflight's two-agent disk budget: overlap admission without multiplying
-  // SQLite scans and worker heaps across the whole fleet. Drain active work on failure.
-  const { withSqliteCanonicalValidationWorkerPool } =
-    await import("./session-accessor.sqlite-canonical-worker-pool.js");
-  await withSqliteCanonicalValidationWorkerPool(env, async () => {
-    const { hasError, firstError } = await runTasksWithConcurrency({
-      tasks,
-      limit: AGENT_DATABASE_PREFLIGHT_CONCURRENCY,
-      errorMode: "stop",
-    });
-    if (hasError) {
-      throw firstError;
-    }
+  const { hasError, firstError } = await runTasksWithConcurrency({
+    tasks,
+    limit: AGENT_DATABASE_PREFLIGHT_CONCURRENCY,
+    errorMode: "stop",
   });
-  if (interruptedSessions > 0) {
-    params.log.info(`session: normalized ${interruptedSessions} legacy run(s) to interrupted`);
+  if (hasError) {
+    throw firstError;
   }
   params.assertCurrent?.();
 }

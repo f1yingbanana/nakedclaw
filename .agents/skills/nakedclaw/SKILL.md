@@ -57,6 +57,13 @@ Method and raw data: `kazusa/.perf/demo/` (paired A/B rig, runs) and
    nothing.
 6. **Kazusa is the only product.** Features Kazusa does not use may cost
    nothing at runtime, but must keep working for anyone who does use them.
+   Exceptions are listed in the Cut table: worlds are created on this version
+   (no legacy session checks at start), and no plugin lives in a character's
+   workspace.
+7. **Credentials are shared.** Every agent uses the one shared credential store
+   (`auth.sharedStore` in the state database). No agent has its own store:
+   per-agent logins (`--agent`, plugin `AuthStorage.forAgent`) land in the
+   shared one, and a cooldown applies to every agent.
 
 If any of these stops being true (a second process opening state, a hosted
 multi-tenant Gateway, file access for users), re-evaluate the cuts first.
@@ -64,16 +71,22 @@ Several would then be data-loss bugs.
 
 ## Cut
 
-| Area              | Change                                                                                                                                                                                                                                                     | Assumption |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| Ownership         | The owner lock and projection sidecar are read once, then trusted. The heartbeat worker's "removed or replaced" report now calls `loseOwner` (upstream ignored it).                                                                                        | 2          |
-| State paths       | Owner-lock path, canonical database path, agent-dir and session-candidate identities are memoized per path (`memoizeStatePathResolver`, bounded at 4,096). One `stat` per identity check instead of two.                                                   | 3          |
-| Caps              | No `MAX_IDLE_EXECUTORS` (4): every agent keeps its database open until the 30 min idle TTL, a restart drain or shutdown. No 64-store cap. A full worker queue waits instead of failing after 10 s. Worker task pools accept 4,096 pending tasks, not 128.  | 1          |
-| Auth              | A successful model call writes usage only when the profile has failure state, or a failure was recorded in this process since its last success.                                                                                                            | 5          |
-| Session rows      | Rebuilt by the next reader instead of after every per-session change.                                                                                                                                                                                      | 6          |
-| Streaming         | Runs hidden from the Control UI that reply only through the message tool, with no block or reasoning streaming (Kazusa's brains), set the existing `suppressLiveStreamOutput`: the text buffer fills, per-token parsing and its event fan-out are skipped. | 6          |
-| Session observer  | Skips an event entirely when it tracks no state and no connection can see the session.                                                                                                                                                                     | 6          |
-| Event-loop health | Node's native `monitorEventLoopDelay` replaces a 20 ms JS job on the Gateway scheduler, whose every wake rescanned all scheduled jobs. Health is computed once a second.                                                                                   | —          |
+| Area              | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Assumption |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| Ownership         | The owner lock and projection sidecar are read once, then trusted. The heartbeat worker's "removed or replaced" report now calls `loseOwner` (upstream ignored it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | 2          |
+| State paths       | Owner-lock path, canonical database path, agent-dir and session-candidate identities are memoized per path (`memoizeStatePathResolver`, bounded at 4,096). One `stat` per identity check instead of two.                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 3          |
+| Caps              | No `MAX_IDLE_EXECUTORS` (4): every agent keeps its database open until the 30 min idle TTL, a restart drain or shutdown. No 64-store cap. A full worker queue waits instead of failing after 10 s. Worker task pools accept 4,096 pending tasks, not 128.                                                                                                                                                                                                                                                                                                                                                                                                            | 1          |
+| Auth              | A successful model call writes usage only when the profile has failure state, or a failure was recorded in this process since its last success.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 5          |
+| Session rows      | Rebuilt by the next reader instead of after every per-session change.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | 6          |
+| Streaming         | Runs hidden from the Control UI that reply only through the message tool, with no block or reasoning streaming (Kazusa's brains), set the existing `suppressLiveStreamOutput`: the text buffer fills, per-token parsing and its event fan-out are skipped.                                                                                                                                                                                                                                                                                                                                                                                                           | 6          |
+| Session observer  | Skips an event entirely when it tracks no state and no connection can see the session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | 6          |
+| Agent DB paths    | `isConfiguredAgentDatabaseTarget` checks exact configured claims across all targets before probing any file for an alias; checking every agent against the list used to stat and realpath each earlier target first. Same answers.                                                                                                                                                                                                                                                                                                                                                                                                                                   | —          |
+| Session startup   | No legacy file-store, ACP, main-key or run-outcome checks per agent, and no eager canonical validation pass; the canonical-validation worker pool that only startup used is deleted, and `certifySessionCanonicalValidationPending` takes only the pending work a runtime read or change captured. A database without a receipt (a copied or restored world, or one that was empty when last certified) is validated at its first session read or change instead: on the main thread, or by a worker that records the receipt on the Gateway's session-row and request paths.                                                                                        | 1, 6       |
+| Recovery          | Publishing a recovered agent no longer refreshes secrets, compares the secrets revision, or requires its model runtime to still be published when admission completes; only a config change supersedes it. A model runtime superseded by a live credential write is republished by the runtime itself; build errors still refuse the agent.                                                                                                                                                                                                                                                                                                                          | 7          |
+| Plugin index      | A native-admission overlay of the installed index reuses the index's fingerprint (the fingerprint already leaves admissions out).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | —          |
+| Plugin workspace  | In a world with a default workspace, every agent's plugin metadata and registry load for the Gateway's plugin workspace, so agents borrow the Gateway's registry. Applies to `agent` CLI runs in another cwd too.                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 6          |
+| Credentials       | One rule, in every world: an agent directory names the shared store unless a scoped `agent --local` or onboarding run owns it (`resolveRuntimeAuthProfileAgentDir`, `isScopedAuthProfileAgentDir`). `resolveAuthProfileStorePath` applies it where a store is opened and where runtime snapshot keys and secret owner ids are made; other agent databases' auth rows are not read (`sqlite-read.ts`). The secrets snapshot holds one shared entry, recovery no longer refreshes secrets per agent, `secrets apply` targets the shared store once, migration and source checks and display paths name the shared store, and inline API-key failures are not recorded. | 7          |
+| Event-loop health | Node's native `monitorEventLoopDelay` replaces a 20 ms JS job on the Gateway scheduler, whose every wake rescanned all scheduled jobs. Health is computed once a second.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | —          |
 
 What these cost us, and how loss is detected now:
 
@@ -98,6 +111,16 @@ What these cost us, and how loss is detected now:
   brains show no live text (they never did: hidden runs' deltas carry no
   session key); observation of a session starts at its next run after a viewer
   connects.
+- **Credentials**: one agent's auth or billing failure cools the profile down
+  for every agent. A key written inline in config (not an auth profile) gets no
+  cooldown at all; Kazusa saves keys as shared profiles. Leftover rows in an
+  agent database's auth tables are ignored, not migrated. In a scoped
+  `agent --local` run, an auth write made from a worker thread cannot see the
+  scope and goes to the shared store. An empty shared store
+  saved beside a legacy `oauth.json` records no migration refusal; Doctor imports
+  older credentials.
+- **Plugin workspace**: a plugin placed in one character's workspace would not
+  load for anyone; one in the default workspace would load for everyone.
 - **Liveness**: run liveness timestamps are refreshed by agent events. Without
   per-token events, a single model reply longer than 10 minutes would look
   stale to steer admission. Provider-level idle timeout and stuck detection are
@@ -190,6 +213,22 @@ blocked recovery under the assumptions. Their real findings (auth cooldowns
 not cleared by concurrent successes, a false loss report on release, an
 unbounded memo, a dead re-check) are fixed.
 
+### Startup and recovery
+
+Mac, the 145-character snapshot after an unclean stop (Windows almost always
+stops uncleanly), Kazusa's two config settings applied
+(`kazusa/.perf/naked/startup/ctl.sh`):
+
+|                                      | before   | after     |
+| ------------------------------------ | -------- | --------- |
+| listening                            | ~18 s    | 11 s      |
+| all 145 characters recovered         | 10.6 min | 1:12–1:31 |
+| recovery models step, all characters | ~400 s   | ~47 s     |
+| characters left degraded             | 1–2      | 0         |
+
+A clean boot listens at about 14 s. Recovery is now limited by opening the
+character databases (`open-wait`), not by preparing them.
+
 ## Rules for working in this fork
 
 - **Every cut names its assumption** in a `NakedClaw:` code comment and in its
@@ -221,9 +260,14 @@ unbounded memo, a dead re-check) are fixed.
   `CHAR_DENY_A/B` applies Kazusa's per-character tool denies).
 - Analysis: `.perf/demo/report-pair.py`, `.perf/naked/percall.py` (main ms per
   model call by area), `bucketdetail.py`, `callers.py`.
-- Shipping: `pnpm build`, `npm pack`, and depend on the tarball as an alias of
-  `openclaw` (`file:` or a published `npm:@scope/nakedclaw@…`). Never a git
-  dependency: it would need the pnpm toolchain on every machine.
+- Startup and recovery: Kazusa's `.perf/naked/startup/ctl.sh` (prepare, start,
+  wait-recovered, summary, stop) boots a copy of the unclean 145-character
+  snapshot; per-agent recovery phases are in the JSON log
+  (`/tmp/openclaw/openclaw-<date>.log`, "recovered after background" records).
+- Shipping: `pnpm build`, then
+  `node scripts/package-openclaw-for-docker.mjs --allow-unreleased-changelog --skip-build --output-dir <dir> --output-name <name>.tgz`
+  (plain `pnpm pack` is refused), published as a GitHub release asset that
+  Kazusa depends on by URL. Never a git dependency: `dist/` is not in git.
 
 ## Upstream
 
@@ -242,8 +286,26 @@ Base `v2026.10.5` (1b58cb9a1b4).
 6. `perf(naked): skip live stream output for runs nobody watches`
 7. `perf(naked): skip session observer work when nobody watches`
 8. `perf(naked): sample event-loop delay with Node's native monitor`
+9. `perf(naked): check exact agent database claims before probing files`
+10. `perf(naked): drop legacy session startup checks and the startup validation pass`
+11. `perf(naked): share the plugin index fingerprint with admission overlays`
+12. `perf(naked): load every agent's plugins for the Gateway workspace`
+13. `perf(naked): use one shared credential store for every agent`
+14. `docs(naked): record startup and recovery cuts`
 
-Tests run: storage (`src/infra/gateway-*`, `sqlite-worker*`, `sqlite-store*`,
+Tests run for 9–13: `src/secrets/*` (runtime, fast path, apply, admission,
+inline refs, state), `src/agents/auth-profiles/*`, `src/agents/sessions/auth-storage*`,
+`src/agents/model-auth*`, `src/agents/prepared-model-runtime.*` (plugin context,
+inbound and startup registries, registry borrow, auth recovery),
+`src/plugins/manifest-registry-installed*`, `plugin-native-admission-*`,
+`src/config/plugin-auto-enable.*`, `src/config/sessions/startup-migration.*`,
+`session-canonical-validation-readiness`, `session-accessor.sqlite-*worker*`,
+`targets*`, `src/gateway/server-agent-database-startup*`,
+`session-startup-migration`, `session-row-prepared-read`,
+`server-methods.canonical-validation` (fixed for cut 4), and Doctor's auth and
+maintenance tests.
+
+Tests run for 1–8: storage (`src/infra/gateway-*`, `sqlite-worker*`, `sqlite-store*`,
 `src/state/openclaw-agent-*`, `openclaw-state-db*`,
 `src/config/sessions/session-store-*`, `session-accessor*`),
 `src/agents/auth-profiles/*`, `src/gateway/session-row-projection*`,

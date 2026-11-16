@@ -107,6 +107,32 @@ describe("prepared model runtime plugin metadata ownership", () => {
     });
   });
 
+  it("loads every agent's plugins for the default workspace when one is configured", () => {
+    const config = {
+      agents: { defaults: { workspace: "/tmp/kazusa-world/workspaces" } },
+      plugins: { allow: ["synthetic"] },
+    };
+    const directSnapshot = createPluginMetadataSnapshot({
+      config,
+      workspaceDir: "/tmp/kazusa-world/workspaces",
+      manifestRegistry: makeRegistry([{ id: "synthetic", channels: [] }]),
+    });
+    using resolveMetadata = vi
+      .spyOn(pluginMetadata, "resolvePluginMetadataSnapshot")
+      .mockReturnValue(directSnapshot);
+    for (const agent of ["aru", "kayoko"]) {
+      prepareOwnedPluginLoadContext(
+        { config, workspaceDir: `/tmp/kazusa-world/workspaces/${agent}` },
+        process.env,
+        undefined,
+      );
+    }
+    expect(resolveMetadata.mock.calls.map(([params]) => params.workspaceDir)).toEqual([
+      "/tmp/kazusa-world/workspaces",
+      "/tmp/kazusa-world/workspaces",
+    ]);
+  });
+
   it("requests selected-runtime metadata for executable prepared probes", () => {
     const input = {
       config: { plugins: { slots: { memory: "none" as const } } },

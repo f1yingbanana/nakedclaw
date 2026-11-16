@@ -617,6 +617,18 @@ export function isConfiguredAgentDatabaseTarget(
   pathname: string,
 ): boolean {
   // Only concrete files prove aliases; preserve exact configured claims for inspection.
+  // NakedClaw: an exact claim anywhere wins before any file is probed; checking
+  // every agent against this list probed each earlier target's files first.
+  // Same answers, reordered (no assumption).
+  if (
+    targets.some(
+      (target) =>
+        target.path === pathname &&
+        (agentId === undefined || target.agentId === undefined || target.agentId === agentId),
+    )
+  ) {
+    return true;
+  }
   return targets.some(
     (target) =>
       (agentId === undefined || target.agentId === undefined || target.agentId === agentId) &&

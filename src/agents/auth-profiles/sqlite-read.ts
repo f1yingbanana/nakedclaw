@@ -20,7 +20,9 @@ import {
   type PersonalCatalogProfiles,
   type PersonalCatalogSelection,
 } from "../../state/user-model-accounts.js";
+import { resolveSharedAuthStorePath } from "./path-resolve.js";
 import { mergePersistedAuthProfileState } from "./persisted.js";
+import { isScopedAuthProfileAgentDir } from "./runtime-scope.js";
 import { AuthProfileStoreUnreadableError } from "./store-unreadable-error.js";
 import { receiveAuthProfileUpdateValue } from "./store-update-transfer.js";
 import type {
@@ -71,6 +73,14 @@ export function prepareAgentAuthProfileRowsRead(options: {
   assertCurrent: () => void;
   dispose: () => Promise<void>;
 } {
+  // NakedClaw: only the shared store, or a scoped run's own, holds credentials
+  // (assumption 7); any other agent database's rows are not read at all.
+  if (
+    path.resolve(options.databasePath) !== path.resolve(resolveSharedAuthStorePath(options.env)) &&
+    !isScopedAuthProfileAgentDir(path.dirname(options.databasePath))
+  ) {
+    return { read: async () => missing, assertCurrent: () => {}, dispose: async () => {} };
+  }
   const databasePath = path.resolve(options.databasePath);
   const agentId = options.agentId;
   const env = cloneEnvWithPlatformSemantics(options.env);

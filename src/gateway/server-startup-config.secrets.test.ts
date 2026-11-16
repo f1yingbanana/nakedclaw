@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInfoWarnErrorLogger as mockLogSecretsForTest } from "../../test/helpers/mock-logger.js";
@@ -12,7 +12,6 @@ import {
   prepareRuntimeAuthProfileStoreSnapshots,
   setRuntimeAuthProfileStoreSnapshot,
 } from "../agents/auth-profiles/runtime-snapshots.js";
-import { writePersistedAuthProfileStoreRaw } from "../agents/auth-profiles/sqlite.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/types.js";
 import {
   flushDiagnosticsTimeline,
@@ -29,7 +28,7 @@ import {
   getActiveSecretsRuntimeSnapshotRevisionState,
 } from "../secrets/runtime-state.js";
 import type { PreparedSecretsRuntimeSnapshot } from "../secrets/runtime.js";
-import { captureEnv, withEnvAsync } from "../test-utils/env.js";
+import { captureEnv } from "../test-utils/env.js";
 import { prepareGatewayStartupConfig } from "./server-startup-config-helpers.js";
 import { createRuntimeSecretsActivator } from "./server-startup-config.js";
 import { makePreparedSecretsSnapshot as preparedSnapshot } from "./server-startup-config.test-support.js";
@@ -1499,96 +1498,8 @@ describe("gateway startup config secret preflight", () => {
     );
   });
 
-  it("keeps the full secrets runtime path when auth profile files are present", async () => {
-    vi.resetModules();
-    const agentDir = autoCleanupTempDirs.make("openclaw-startup-auth-store-");
-    const runtimeImport = vi.fn();
-    const prepareRuntimeSecretsSnapshot = vi.fn(async ({ config }) => {
-      // Capture revisions from the same module generation as activation.
-      const revisions = await import("../agents/auth-profiles/runtime-snapshots.js");
-      return {
-        ...preparedSnapshot(config),
-        authStoreCredentialsRevision: revisions.getRuntimeAuthProfileStoreCredentialsRevision(),
-        authStoreSnapshotsRevision: revisions.getRuntimeAuthProfileStoreSnapshotsRevision(),
-      };
-    });
-    const activateRuntimeSecretsSnapshot = vi.fn();
-    writeFileSync(
-      path.join(agentDir, "auth-profiles.json"),
-      JSON.stringify(
-        createAuthProfileStoreFixture({
-          "openai:default": { type: "api_key", provider: "openai", key: "sk-test" },
-        }),
-      ),
-    );
-    installGatewayStartupSecretsRuntimeMock({
-      runtimeImport,
-      prepareRuntimeSecretsSnapshot,
-      activateRuntimeSecretsSnapshot,
-    });
-    try {
-      await activateImportedStartupConfig({ agents: { entries: { default: { agentDir } } } });
-      expect(runtimeImport).toHaveBeenCalledTimes(1);
-      expect(prepareRuntimeSecretsSnapshot).toHaveBeenCalledTimes(1);
-      expect(activateRuntimeSecretsSnapshot).toHaveBeenCalledTimes(1);
-    } finally {
-      cleanupGatewayStartupSecretsRuntimeMock();
-      vi.resetModules();
-    }
-  });
-
-  it("uses the activation env when publishing persisted startup auth", async () => {
-    const root = autoCleanupTempDirs.make("openclaw-startup-activation-env-auth-");
-    const processHome = path.join(root, "process-home");
-    const activationHome = path.join(root, "activation-home");
-    const activationAgentDir = path.join(activationHome, "configured-agent");
-    mkdirSync(processHome, { recursive: true });
-    mkdirSync(activationAgentDir, { recursive: true });
-
-    await withEnvAsync(
-      {
-        HOME: processHome,
-        OPENCLAW_STATE_DIR: path.join(processHome, "state"),
-        OPENCLAW_AGENT_DIR: undefined,
-      },
-      async () => {
-        writePersistedAuthProfileStoreRaw(
-          createAuthProfileStoreFixture({
-            "openai:default": {
-              type: "api_key",
-              provider: "openai",
-              key: "fake-activation-env-key",
-            },
-          }),
-          activationAgentDir,
-        );
-        const secretsRuntime = await import("../secrets/runtime.js");
-        const activationEnv = {
-          ...process.env,
-          HOME: activationHome,
-          OPENCLAW_STATE_DIR: path.join(activationHome, "state"),
-        };
-
-        try {
-          await activateImportedStartupConfig(
-            {
-              agents: {
-                entries: { main: { agentDir: "~/configured-agent" } },
-              },
-            },
-            activationEnv,
-          );
-
-          const activeStore = secretsRuntime.getActiveSecretsRuntimeSnapshot()?.authStores[0];
-          expect(activeStore?.agentDir).toBe(activationAgentDir);
-          expect(activeStore?.store.profiles["openai:default"]).toMatchObject({
-            key: "fake-activation-env-key",
-          });
-        } finally {
-          secretsRuntime.clearSecretsRuntimeSnapshot();
-        }
-      },
-    );
-  });
+  // NakedClaw: removed the tests of an agent's own legacy auth file and of its
+  // own configured store; agents share one store and legacy sources are only
+  // checked for the shared one (nakedclaw skill, assumption 7).
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

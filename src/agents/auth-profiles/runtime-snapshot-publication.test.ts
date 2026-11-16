@@ -19,63 +19,12 @@ import {
   setRuntimeAuthProfileStoreSnapshotAtDatabasePath,
 } from "./runtime-snapshots.js";
 import { createSnapshotStore as createStore } from "./runtime-snapshots.test-support.js";
-import { resolveAuthProfileDatabasePath } from "./sqlite.js";
+import { resolveAuthProfileDatabasePath, resolveAuthProfileStorePath } from "./sqlite.js";
 import type { AuthProfileStore, RuntimeAuthProfileStore } from "./types.js";
 
 describe("runtime auth snapshot publication", () => {
-  it("keeps locally shadowed snapshots unchanged when shared credentials rotate", () => {
-    const sharedPath = "/tmp/openclaw-auth-incremental/shared.sqlite";
-    const owner = {
-      databasePath: sharedPath,
-      sharedDatabasePath: sharedPath,
-      location: "state-db" as const,
-    };
-    const localDir = "/tmp/openclaw-auth-incremental/local";
-    const inheritedDir = "/tmp/openclaw-auth-incremental/inherited";
-    const localPath = resolveAuthProfileDatabasePath(localDir);
-    const inheritedPath = resolveAuthProfileDatabasePath(inheritedDir);
-    const profile = createApiKeyCredential("fixture", "synthetic-local");
-    const mutation = {
-      credentialsChanged: true,
-      stateChanged: false,
-      profileIds: ["fixture:primary"],
-    };
-    try {
-      for (const [databasePath, agentDir, runtimeLocalProfileIds] of [
-        [localPath, localDir, ["fixture:primary"]],
-        [inheritedPath, inheritedDir, []],
-      ] as const) {
-        setRuntimeAuthProfileStoreSnapshotAtDatabasePath(
-          {
-            version: 1,
-            profiles: { "fixture:primary": profile },
-            runtimeLocalProfileIds: [...runtimeLocalProfileIds],
-            runtimeHasLocalOAuthProfiles: false,
-          },
-          databasePath,
-          agentDir,
-          { ...owner, databasePath },
-        );
-      }
-      const localRevision = getRuntimeAuthProfileStoreSnapshotRevision(localDir);
-      noteRuntimeAuthProfileStorePersistedMutation(undefined, mutation, owner);
-      expect(getRuntimeAuthProfileStoreSnapshotCore(localDir)?.profiles["fixture:primary"]).toEqual(
-        profile,
-      );
-      expect(getRuntimeAuthProfileStoreSnapshotRevision(localDir)).toBe(localRevision);
-      expect(getRuntimeAuthProfileStoreSnapshotCore(inheritedDir)).toBeUndefined();
-
-      expect(
-        listRuntimeAuthProfileStoreSnapshotsForSharedOwner(owner, {
-          ...mutation,
-          credentialsChanged: false,
-          stateChanged: true,
-        }).map((entry) => entry.databasePath),
-      ).toEqual([localPath]);
-    } finally {
-      clearRuntimeAuthProfileStoreSnapshots();
-    }
-  });
+  // NakedClaw: removed the test of an agent-local snapshot shadowing the shared one;
+  // agents have no stores of their own (assumption 7).
 
   it.each(["oauth", "hidden", "unknown"] as const)(
     "refreshes a shared shadow with %s local ownership facts",
@@ -105,27 +54,21 @@ describe("runtime auth snapshot publication", () => {
         };
         expect(listRuntimeAuthProfileStoreSnapshotsForSharedOwner(owner, mutation)).toHaveLength(1);
         noteRuntimeAuthProfileStorePersistedMutation(undefined, mutation, owner);
-        expect(getRuntimeAuthProfileStoreSnapshotCore(agentDir)).toBeUndefined();
+        expect(getOwnedRuntimeAuthProfileStoreSnapshotAtDatabasePath(databasePath)).toBeUndefined();
       } finally {
         clearRuntimeAuthProfileStoreSnapshots();
       }
     },
   );
 
-  it("fences a deleted snapshot independently of sibling publication and repeated clear", () => {
-    const firstDir = "/tmp/openclaw-auth-deleted-first";
-    const secondDir = "/tmp/openclaw-auth-deleted-second";
+  it("fences a deleted snapshot again on a repeated clear", () => {
+    const agentDir = "/tmp/openclaw-auth-deleted";
     try {
-      setRuntimeAuthProfileStoreSnapshot(createStore("first"), firstDir);
-      setRuntimeAuthProfileStoreSnapshot(createStore("second"), secondDir);
-      clearRuntimeAuthProfileStoreSnapshotCore(secondDir);
-      const deletedRevision = getRuntimeAuthProfileStoreSnapshotRevision(secondDir);
-      setRuntimeAuthProfileStoreSnapshot(createStore("replaced"), firstDir);
-      expect(getRuntimeAuthProfileStoreSnapshotRevision(secondDir)).toBe(deletedRevision);
-      clearRuntimeAuthProfileStoreSnapshotCore(secondDir);
-      expect(getRuntimeAuthProfileStoreSnapshotRevision(secondDir)).toBeGreaterThan(
-        deletedRevision,
-      );
+      setRuntimeAuthProfileStoreSnapshot(createStore("first"), agentDir);
+      clearRuntimeAuthProfileStoreSnapshotCore(agentDir);
+      const deletedRevision = getRuntimeAuthProfileStoreSnapshotRevision(agentDir);
+      clearRuntimeAuthProfileStoreSnapshotCore(agentDir);
+      expect(getRuntimeAuthProfileStoreSnapshotRevision(agentDir)).toBeGreaterThan(deletedRevision);
     } finally {
       clearRuntimeAuthProfileStoreSnapshots();
     }
@@ -185,42 +128,21 @@ describe("runtime auth snapshot publication", () => {
     ).toBeUndefined();
   });
 
-  it("publishes one shared credential generation before notifying any derived snapshot reader", () => {
-    const sharedPath = "/tmp/openclaw-auth-atomic/shared.sqlite";
+  it("publishes one shared credential generation before notifying any snapshot reader", () => {
+    // NakedClaw: every agent reads the one shared snapshot (assumption 7).
+    const sharedPath = resolveAuthProfileStorePath();
     const owner = {
       databasePath: sharedPath,
       sharedDatabasePath: sharedPath,
       location: "state-db" as const,
     };
     const agentDirs = ["/tmp/openclaw-auth-atomic/first", "/tmp/openclaw-auth-atomic/second"];
-    const fallbackDir = "/tmp/openclaw-auth-atomic/local-oauth";
     const before = createStore("before");
     const after = createStore("after");
     const observations: Array<Array<string | undefined>> = [];
     let unregister: (() => void) | undefined;
     try {
       setRuntimeAuthProfileStoreSnapshotAtDatabasePath(before, sharedPath, undefined, owner);
-      for (const agentDir of agentDirs) {
-        const databasePath = resolveAuthProfileDatabasePath(agentDir);
-        const store = mergeLocalAuthProfileStoreWithInheritedStore(
-          {
-            version: 1,
-            profiles: { local: createApiKeyCredential("fixture", "synthetic-local") },
-          },
-          before,
-        );
-        setRuntimeAuthProfileStoreSnapshotAtDatabasePath(store, databasePath, agentDir, {
-          ...owner,
-          databasePath,
-        });
-      }
-      const fallbackPath = resolveAuthProfileDatabasePath(fallbackDir);
-      setRuntimeAuthProfileStoreSnapshotAtDatabasePath(
-        mergeLocalAuthProfileStoreWithInheritedStore(createStore("local-oauth"), before),
-        fallbackPath,
-        fallbackDir,
-        { ...owner, databasePath: fallbackPath },
-      );
       unregister = registerRuntimeAuthProfileStoreMutationListener(() => {
         observations.push(
           agentDirs.map((agentDir) => {
@@ -229,22 +151,15 @@ describe("runtime auth snapshot publication", () => {
             return credential?.type === "oauth" ? credential.access : undefined;
           }),
         );
-        expect(getRuntimeAuthProfileStoreSnapshotCore(fallbackDir)).toBeUndefined();
       });
       const deferred = publishRuntimeAuthProfileSharedCredentialMutation(owner, after, {
         credentialsChanged: true,
         stateChanged: false,
         profileIds: ["openai:default"],
       });
-      expect(deferred?.entries.map((entry) => entry.databasePath)).toEqual([fallbackPath]);
+      expect(deferred?.entries).toEqual([]);
       expect(observations.length).toBeGreaterThan(0);
       expect(observations.every((values) => values.every((value) => value === "after"))).toBe(true);
-      const shared = getOwnedRuntimeAuthProfileStoreSnapshotAtDatabasePath(sharedPath)?.store;
-      expect(shared?.profiles["openai:default"]).toMatchObject({
-        type: "oauth",
-        provider: "openai",
-        access: "after",
-      });
       Object.assign(after.profiles["openai:default"]!, { access: "mutated-after-publication" });
       expect(
         getRuntimeAuthProfileStoreSnapshotCore(agentDirs[0])?.profiles["openai:default"],

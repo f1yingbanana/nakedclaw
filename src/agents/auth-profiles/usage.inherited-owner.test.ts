@@ -35,7 +35,6 @@ import { markAuthProfileBlockedUntil, markAuthProfileFailure } from "./usage.js"
 
 const PRIMARY_ID = "openai:primary";
 const BACKUP_ID = "openai:backup";
-const LOCAL_ID = "openai:local";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 function createMainStore(): AuthProfileStore {
@@ -274,20 +273,10 @@ describe("inherited auth-profile usage persistence", () => {
     expect(readUserModelAuthProfile(personalId)?.credential).toBeDefined();
   });
 
+  // NakedClaw: the child has no store of its own; its block lands in the shared
+  // store and applies to every agent (assumption 7).
   it("keeps an inherited primary blocked for the next child run", async () => {
     writeMainStore();
-    const localCooldownUntil = Date.now() + 30 * 60 * 1000;
-    saveAuthProfileStore(
-      {
-        version: 1,
-        profiles: {
-          [LOCAL_ID]: { type: "api_key", provider: "openai", key: "local-key" },
-        },
-        usageStats: { [LOCAL_ID]: { cooldownUntil: localCooldownUntil } },
-      },
-      childAgentDir,
-      { filterExternalAuthProfiles: false, syncExternalCli: false },
-    );
     const childStore = ensureAuthProfileStore(childAgentDir);
     const blockedUntil = Date.now() + 60 * 60 * 1000;
 
@@ -300,11 +289,6 @@ describe("inherited auth-profile usage persistence", () => {
       modelId: "gpt-5.6-sol",
     });
 
-    expect(childStore.usageStats?.[LOCAL_ID]?.cooldownUntil).toBe(localCooldownUntil);
-    const persistedChild = loadPersistedAuthProfileStore(childAgentDir);
-    expect(persistedChild?.profiles[PRIMARY_ID]).toBeUndefined();
-    expect(persistedChild?.usageStats?.[LOCAL_ID]?.cooldownUntil).toBe(localCooldownUntil);
-
     clearRuntimeAuthProfileStoreSnapshots();
     const nextRunStore = ensureAuthProfileStore(childAgentDir);
     expect({
@@ -313,11 +297,13 @@ describe("inherited auth-profile usage persistence", () => {
       nextRunOrder: resolveAuthProfileOrder({ store: nextRunStore, provider: "openai" }),
     }).toEqual({
       ownerBlockedUntil: blockedUntil,
-      nextRunOrder: [BACKUP_ID, LOCAL_ID, PRIMARY_ID],
+      nextRunOrder: [BACKUP_ID, PRIMARY_ID],
     });
   });
 
-  it("clears inherited health without changing selection ownership", async () => {
+  // NakedClaw: the child has no store of its own; its success clears the shared
+  // profile's health for every agent and is the shared last-good (assumption 7).
+  it("clears shared health from a child run", async () => {
     const lastUsed = Date.now() - 60_000;
     const mainStore = createMainStore();
     mainStore.lastGood = { openai: BACKUP_ID };
@@ -334,18 +320,6 @@ describe("inherited auth-profile usage persistence", () => {
       filterExternalAuthProfiles: false,
       syncExternalCli: false,
     });
-    const localCooldownUntil = Date.now() + 30_000;
-    saveAuthProfileStore(
-      {
-        version: 1,
-        profiles: {
-          [LOCAL_ID]: { type: "api_key", provider: "openai", key: "local-key" },
-        },
-        usageStats: { [LOCAL_ID]: { cooldownUntil: localCooldownUntil } },
-      },
-      childAgentDir,
-      { filterExternalAuthProfiles: false, syncExternalCli: false },
-    );
     const childStore = ensureAuthProfileStore(childAgentDir);
 
     await markAuthProfileSuccess({
@@ -356,18 +330,10 @@ describe("inherited auth-profile usage persistence", () => {
     });
 
     const persistedMain = loadPersistedAuthProfileStore(mainAgentDir);
-    expect(persistedMain?.lastGood?.openai).toBe(BACKUP_ID);
-    expect(persistedMain?.usageStats?.[PRIMARY_ID]).toMatchObject({
-      lastUsed,
-      errorCount: 0,
-    });
+    expect(persistedMain?.lastGood?.openai).toBe(PRIMARY_ID);
+    expect(persistedMain?.usageStats?.[PRIMARY_ID]).toMatchObject({ errorCount: 0 });
     expect(persistedMain?.usageStats?.[PRIMARY_ID]?.cooldownUntil).toBeUndefined();
     expect(persistedMain?.usageStats?.[PRIMARY_ID]?.cooldownClassification).toBeUndefined();
-    expect(childStore.usageStats?.[LOCAL_ID]?.cooldownUntil).toBe(localCooldownUntil);
     expect(childStore.usageStats?.[PRIMARY_ID]?.cooldownUntil).toBeUndefined();
-    const persistedChild = loadPersistedAuthProfileStore(childAgentDir);
-    expect(persistedChild?.profiles[PRIMARY_ID]).toBeUndefined();
-    expect(persistedChild?.usageStats?.[PRIMARY_ID]).toBeUndefined();
-    expect(persistedChild?.lastGood?.openai).toBeUndefined();
   });
 });

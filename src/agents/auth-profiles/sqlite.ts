@@ -28,6 +28,7 @@ import {
 import { resolveUserPath } from "../../utils.js";
 import { resolveRegisteredAgentIdForDir } from "../agent-dir-registry.js";
 import { resolveSharedAuthStoreOwnership, resolveSharedAuthStorePath } from "./path-resolve.js";
+import { isScopedAuthProfileAgentDir } from "./runtime-scope.js";
 import { prepareFreshSharedAuthStoreWriteAsync } from "./shared-store-bootstrap-async.js";
 import { prepareFreshSharedAuthStoreWrite } from "./shared-store-bootstrap.js";
 import {
@@ -119,6 +120,31 @@ function resolveAuthProfileDatabaseOptions(
   };
 }
 
+// NakedClaw: the store an auth read or write opens. Every agent's credentials
+// live in the shared store (nakedclaw skill, assumption 7), so an agent
+// directory names the shared store here, the one place a store is chosen, with
+// the same rule as `resolveRuntimeAuthProfileAgentDir`: callers that pass a raw
+// agent directory and callers that resolve it first agree. A scoped CLI run
+// keeps its own directory. Ownership questions
+// (`resolveAuthProfileDatabaseOwnerId`) still use the agent database itself.
+function resolveAuthProfileStoreTarget(
+  agentDir?: string,
+  env: NodeJS.ProcessEnv = process.env,
+): AuthProfileDatabaseTarget {
+  return resolveAuthProfileDatabaseOptions(
+    agentDir && isScopedAuthProfileAgentDir(agentDir) ? agentDir : undefined,
+    env,
+  );
+}
+
+/** The database holding an agent's credentials: the shared store, or a scoped run's own. */
+export function resolveAuthProfileStorePath(
+  agentDir?: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveAuthProfileStoreTarget(agentDir, env).path;
+}
+
 /** Filename-only consumers do not need reverse agent ownership discovery. */
 export function resolveAuthProfileDatabasePath(agentDir: string): string {
   return agentDir
@@ -159,7 +185,7 @@ function resolveAuthProfileDatabaseKind(
   if (database && "path" in database) {
     return "shared-state";
   }
-  return resolveAuthProfileDatabaseOptions(agentDir).kind;
+  return resolveAuthProfileStoreTarget(agentDir).kind;
 }
 
 /** Validate selected-agent ownership without requiring a current session schema. */
@@ -229,7 +255,7 @@ function inspectPersistedAuthProfileCell(
       resolveAuthProfileDatabaseKind(agentDir, database),
     );
   }
-  return inspectAuthProfileJsonCellReadOnly(resolveAuthProfileDatabaseOptions(agentDir), target);
+  return inspectAuthProfileJsonCellReadOnly(resolveAuthProfileStoreTarget(agentDir), target);
 }
 
 /** Distinguishes an absent auth row from a present store that could not be read. */
@@ -398,7 +424,7 @@ export function prepareAuthProfileWriteTransaction(
     allowExplicitMain: options.sharedStoreWrite === true,
     env,
   });
-  const databaseTarget = resolveAuthProfileDatabaseOptions(
+  const databaseTarget = resolveAuthProfileStoreTarget(
     sharedStoreWrite ? undefined : agentDir,
     env,
   );
@@ -421,7 +447,7 @@ export async function prepareAuthProfileWriteTransactionAsync(
   });
   options.assertEnvironment?.(env);
   assertCurrent?.();
-  const databaseTarget = resolveAuthProfileDatabaseOptions(
+  const databaseTarget = resolveAuthProfileStoreTarget(
     sharedStoreWrite ? undefined : capturedAgentDir,
     env,
   );

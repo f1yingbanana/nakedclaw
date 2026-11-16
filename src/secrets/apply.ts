@@ -5,13 +5,12 @@ import { isDeepStrictEqual } from "node:util";
 import { resolveAgentDir } from "../agents/agent-scope.js";
 import { loadAuthProfileStoreForSecretsRuntime } from "../agents/auth-profiles.js";
 import { AUTH_STORE_VERSION } from "../agents/auth-profiles/constants.js";
-import { resolveSharedAuthStorePath } from "../agents/auth-profiles/path-resolve.js";
 import {
   coercePersistedAuthProfileStore,
   loadPersistedAuthProfileStore,
   loadPersistedSharedAuthProfileStore,
 } from "../agents/auth-profiles/persisted.js";
-import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
+import { resolveAuthProfileStorePath } from "../agents/auth-profiles/sqlite.js";
 import { saveAuthProfileStoreIfPersistenceSnapshotMatches } from "../agents/auth-profiles/store-runtime.js";
 import {
   captureAuthProfileStorePersistenceSnapshot,
@@ -459,7 +458,8 @@ function resolveAuthStoreForTarget(params: {
   const authStoreTarget: Extract<AuthProfileStoreTarget, { kind: "agent" }> = {
     kind: "agent",
     agentDir,
-    path: resolveAuthProfileDatabasePath(agentDir),
+    // NakedClaw: keyed by the store holding the agent's profiles (assumption 7).
+    path: resolveAuthProfileStorePath(agentDir, scopedEnv),
   };
   const authStorePath = authStoreTarget.path;
   const existing = params.authStores.get(authStorePath)?.store;
@@ -630,9 +630,7 @@ async function validateProjectedSecretsState(params: {
       includeAuthStoreRefs: params.write || params.authStores.size > 0,
       loadAuthStore: (agentDir?: string) => {
         const storePath = resolveUserPath(
-          agentDir
-            ? resolveAuthProfileDatabasePath(agentDir)
-            : resolveSharedAuthStorePath(params.env),
+          resolveAuthProfileStorePath(agentDir, params.env),
           params.env,
         );
         const override = authStoreLookup.get(storePath);

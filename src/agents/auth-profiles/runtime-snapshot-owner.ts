@@ -28,7 +28,7 @@ import {
   getRuntimeExternalCliProfileIds,
   setRuntimeExternalCliProfileIds,
 } from "./runtime-external-profile-references.js";
-import { resolveAuthProfileDatabasePath } from "./sqlite.js";
+import { resolveAuthProfileStorePath } from "./sqlite.js";
 import type {
   AuthProfileCredential,
   AuthProfileStore,
@@ -292,7 +292,9 @@ export function prepareRuntimeAuthProfileStoreSnapshots(
   return entries.map((entry) => {
     const databasePath =
       entry.databasePath ??
-      (entry.agentDir ? resolveAuthProfileDatabasePath(entry.agentDir) : owner.sharedDatabasePath);
+      (entry.agentDir
+        ? resolveAuthProfileStorePath(entry.agentDir, env)
+        : owner.sharedDatabasePath);
     return {
       databasePath,
       agentDir: path.dirname(databasePath),

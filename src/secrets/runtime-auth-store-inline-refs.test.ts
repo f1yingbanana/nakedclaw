@@ -11,6 +11,8 @@ import {
 const EMPTY_LOADABLE_PLUGIN_ORIGINS = new Map();
 const { prepareSecretsRuntimeSnapshot } = setupSecretsRuntimeSnapshotTestHooks();
 
+// NakedClaw: auth-store refs belong to the one shared store, so their owner ids and
+// warning paths name it, not the requested agent directory (assumption 7).
 describe("secrets runtime snapshot inline auth-store refs", () => {
   it("normalizes inline SecretRef object on token to tokenRef", async () => {
     const snapshot = await prepareSecretsRuntimeSnapshot({
@@ -129,11 +131,11 @@ describe("secrets runtime snapshot inline auth-store refs", () => {
       expect.arrayContaining([
         expect.objectContaining({
           code: "SECRETS_REF_IGNORED_INACTIVE_SURFACE",
-          path: `/tmp/openclaw-agent-main.auth-profiles.${profileId}.key`,
+          path: `.auth-profiles.${profileId}.key`,
         }),
         expect.objectContaining({
           code: "SECRETS_REF_IGNORED_INACTIVE_SURFACE",
-          path: `/tmp/openclaw-agent-main.auth-profiles.${tokenProfileId}.token`,
+          path: `.auth-profiles.${tokenProfileId}.token`,
         }),
       ]),
     );
@@ -180,7 +182,7 @@ describe("secrets runtime snapshot inline auth-store refs", () => {
     expect(snapshot.degradedOwners).toMatchObject([
       {
         ownerKind: "account",
-        ownerId: resolveAuthProfileSecretOwnerId({ agentDir, profileId: coldProfileId }),
+        ownerId: resolveAuthProfileSecretOwnerId({ profileId: coldProfileId }),
         state: "unavailable",
         degradationState: "cold",
       },
@@ -219,7 +221,7 @@ describe("secrets runtime snapshot inline auth-store refs", () => {
     expect(snapshot.degradedOwners).toMatchObject([
       {
         ownerKind: "account",
-        ownerId: resolveAuthProfileSecretOwnerId({ agentDir, profileId }),
+        ownerId: resolveAuthProfileSecretOwnerId({ profileId }),
         state: "unavailable",
         reason: "secret provider is not configured",
       },
@@ -228,7 +230,7 @@ describe("secrets runtime snapshot inline auth-store refs", () => {
       expect.arrayContaining([
         expect.objectContaining({
           code: "SECRETS_OWNER_UNAVAILABLE",
-          path: `${agentDir}.auth-profiles.${profileId}.key`,
+          path: `.auth-profiles.${profileId}.key`,
         }),
       ]),
     );

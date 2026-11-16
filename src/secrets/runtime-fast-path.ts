@@ -1,22 +1,20 @@
 import { existsSync } from "node:fs";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
-import { listAgentIds, resolveAgentDir } from "../agents/agent-scope-config.js";
-import { copyCanonicalAuthProfileCredentialObservations } from "../agents/auth-profiles/credential-observation.js";
-import { resolveSharedAuthStorePath } from "../agents/auth-profiles/path-resolve.js";
+import { resolveRuntimeAuthProfileAgentDir } from "../agents/auth-profiles/runtime-scope.js";
 import {
   getRuntimeAuthProfileStoreCredentialsRevision,
   getRuntimeAuthProfileStoreSnapshotsRevision,
   prepareRuntimeAuthProfileStoreSnapshots,
 } from "../agents/auth-profiles/runtime-snapshots.js";
-import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
+import { resolveAuthProfileStorePath } from "../agents/auth-profiles/sqlite.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
-import { resolveLegacyInheritedAuthAgentDir } from "../agents/legacy-inherited-auth-dir.js";
 import { cloneConfigWithResolutionFacts } from "../config/resolution-facts.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import type { PluginOrigin } from "../plugins/plugin-origin.types.js";
 import { resolveUserPath } from "../utils.js";
+import { loadAdmittedAuthStores } from "./runtime-auth-store-admission.js";
 import { hasCredentialBearingObjectValue, hasSecretRefCandidate } from "./runtime-secret-scan.js";
 import type { SecretDefaults } from "./runtime-shared.js";
 import type {
@@ -56,28 +54,11 @@ export function mergeSecretsRuntimeEnv(
   return merged;
 }
 
-export function collectCandidateAgentDirs(
-  config: OpenClawConfig,
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
-): string[] {
-  const dirs = new Set<string>();
-  dirs.add(resolveUserPath(resolveAgentDir(config, "main", env), env));
-  dirs.add(resolveUserPath(resolveLegacyInheritedAuthAgentDir(config, env), env));
-  for (const agentId of listAgentIds(config)) {
-    dirs.add(resolveUserPath(resolveAgentDir(config, agentId, env), env));
-  }
-  return [...dirs];
-}
-
-export function resolveRefreshAgentDirs(
-  config: OpenClawConfig,
-  context: SecretsRuntimeRefreshContext,
-): string[] {
-  const configDerived = collectCandidateAgentDirs(config, context.env);
-  if (!context.explicitAgentDirs || context.explicitAgentDirs.length === 0) {
-    return configDerived;
-  }
-  return uniqueStrings([...context.explicitAgentDirs, ...configDerived]);
+// NakedClaw: agents have no stores of their own (assumption 7), so no snapshot
+// walks every configured agent's directory; only directories a caller passed
+// are carried to the next refresh.
+export function resolveRefreshAgentDirs(context: SecretsRuntimeRefreshContext): string[] {
+  return context.explicitAgentDirs ? [...context.explicitAgentDirs] : [];
 }
 
 export function createEmptyRuntimeWebToolsMetadata(): RuntimeWebToolsMetadata {
@@ -177,30 +158,21 @@ export function prepareSecretsRuntimeFastPathSnapshot(params: {
   const sourceConfig = cloneConfigWithResolutionFacts(params.config);
   const resolvedConfig = cloneConfigWithResolutionFacts(params.config);
   const includeAuthStoreRefs = params.includeAuthStoreRefs ?? true;
-  const candidateDirs = params.agentDirs?.length
-    ? uniqueStrings(params.agentDirs.map((entry) => resolveUserPath(entry, runtimeEnv)))
-    : collectCandidateAgentDirs(resolvedConfig, runtimeEnv);
+  const candidateDirs = uniqueStrings(
+    (params.agentDirs ?? []).map((entry) => resolveUserPath(entry, runtimeEnv)),
+  );
   let authStores: Array<{ agentDir: string; store: AuthProfileStore }> = [];
   if (includeAuthStoreRefs) {
+    // NakedClaw: one shared credential store, as in `loadAdmittedAuthStores`
+    // (assumption 7).
     if (!params.loadAuthStore) {
-      if (
-        candidateDirs.some((agentDir) => existsSync(resolveAuthProfileDatabasePath(agentDir))) ||
-        existsSync(resolveSharedAuthStorePath(runtimeEnv))
-      ) {
+      const agentDir = resolveRuntimeAuthProfileAgentDir();
+      if (existsSync(resolveAuthProfileStorePath(agentDir, runtimeEnv))) {
         return null;
       }
-      authStores = candidateDirs.map((agentDir) => ({
-        agentDir,
-        store: { version: 1, profiles: {} },
-      }));
+      authStores = [{ agentDir: agentDir ?? "", store: { version: 1, profiles: {} } }];
     } else {
-      const loadAuthStore = params.loadAuthStore;
-      authStores = candidateDirs.map((agentDir) => {
-        const source = loadAuthStore(agentDir);
-        const store = structuredClone(source);
-        copyCanonicalAuthProfileCredentialObservations(source.profiles, store.profiles);
-        return { agentDir, store };
-      });
+      authStores = loadAdmittedAuthStores(params.loadAuthStore);
     }
   }
   if (!canUseSecretsRuntimeFastPath({ sourceConfig, authStores })) {

@@ -9555,8 +9555,6 @@
 ["src/secrets/runtime-web-tools.test.ts","./runtime-web-tools-manifest.runtime.js","cb66de8e3f7957ff5b7ce6f7510b3516892fe7839a9822118e6ceef2f24450bf",1]
 ["src/secrets/runtime-web-tools.test.ts","./runtime-web-tools-public-artifacts.runtime.js","d577105f93990b689878bfd8c421506f8180a3a7eb68e75b3c0bc9f10b91e294",1]
 ["src/secrets/runtime-zalo.test-support.ts","../channels/plugins/bootstrap-registry.js","9f45704d0d6648f4f788078860433dc53e8368cd6272dab2b3b33425bb5c0c15",1]
-["src/secrets/runtime.auth.integration.test.ts","./runtime-owner-assignments.js","9a309f741274a1246baae7ec68c891403399e0b1c4647d8da228ced367b8c373",1]
-["src/secrets/runtime.auth.integration.test.ts","./runtime-prepare.runtime.js","ef8150ca803b3188a70cdedf6432382c97f1e0b22adcaba3fb3265b78b455ffc",1]
 ["src/secrets/runtime.coverage.test.ts","../plugins/capability-provider-runtime.js","eac8d0653652e80e92c27be198331e89ee11385dea75c0e10ff9d2214dca111b",1]
 ["src/secrets/runtime.coverage.test.ts","../plugins/installed-plugin-index-records.js","afb2b4a588159d57df8f5038c979f1f9b79ba4922c881e627fa1aa25d5658cba",1]
 ["src/secrets/runtime.coverage.test.ts","../plugins/web-provider-public-artifacts.explicit.js","e52db29eea3144359a190a68acb943b7914196a0399bec88a6d89a639aa701ef",1]

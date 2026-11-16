@@ -12,10 +12,12 @@ describe("hasAuthProfileStoreSourceForProvider", () => {
     vi.unstubAllEnvs();
   });
 
+  // NakedClaw: runtime reads only the shared store (assumption 7), so these stores
+  // are the shared one: the main agent database of a legacy-main world.
   async function withAgentStore(profiles: Record<string, unknown>) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-source-"));
     const stateDir = path.join(root, "state");
-    const agentDir = path.join(root, "agent");
+    const agentDir = path.join(stateDir, "agents", "main", "agent");
     await fs.mkdir(agentDir, { recursive: true });
     await fs.mkdir(stateDir, { recursive: true });
     vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
@@ -26,7 +28,7 @@ describe("hasAuthProfileStoreSourceForProvider", () => {
   async function withLegacyAuthStore(profiles: Record<string, unknown>) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-source-"));
     const stateDir = path.join(root, "state");
-    const agentDir = path.join(root, "agent");
+    const agentDir = path.join(stateDir, "agents", "main", "agent");
     await fs.mkdir(agentDir, { recursive: true });
     await fs.mkdir(stateDir, { recursive: true });
     vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);

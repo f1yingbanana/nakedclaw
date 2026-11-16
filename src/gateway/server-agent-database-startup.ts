@@ -1,6 +1,3 @@
-import { resolveAgentDir } from "../agents/agent-scope-config.js";
-import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
-import { getRuntimeConfigSourceSnapshot } from "../config/runtime-snapshot.js";
 import {
   isConfiguredAgentDatabaseTarget,
   resolveConfiguredAgentDatabaseTargets,
@@ -12,7 +9,6 @@ import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-reque
 import { getSpawnBroker, runWithSpawnBroker } from "../process/spawn-broker/context.js";
 import { withAgentDatabasePreparationGuard } from "../state/agent-database-admission.js";
 import type { getAgentDatabaseStartupAdmission } from "../state/agent-database-startup.js";
-import { isSameOpenClawAgentDatabasePath } from "../state/openclaw-agent-db.paths.js";
 
 function assertAgentDatabaseConfiguration(
   cfg: OpenClawConfig,
@@ -141,71 +137,24 @@ export function activateGatewayAgentDatabaseStartup(params: {
       }),
     publishAgent: ({ agentId, paths, env, signal, assertCurrent, phase }) =>
       runWithSpawnBroker(broker, async () => {
-        phase("secrets");
-        const [
-          { refreshPreparedModelRuntimeSnapshots, getPreparedModelRuntimeSnapshot },
-          { listConfiguredOwnerInputs },
-          {
-            getActiveSecretsRuntimeSnapshot,
-            getActiveSecretsRuntimeSnapshotRevision,
-            refreshActiveSecretsRuntimeSnapshotForConfig,
-          },
-        ] = await Promise.all([
-          import("../agents/prepared-model-runtime.js"),
-          import("../agents/prepared-model-runtime.configured.js"),
-          import("../secrets/runtime.js"),
-        ]);
+        const [{ refreshPreparedModelRuntimeSnapshots }, { listConfiguredOwnerInputs }] =
+          await Promise.all([
+            import("../agents/prepared-model-runtime.js"),
+            import("../agents/prepared-model-runtime.configured.js"),
+          ]);
         assertCurrent();
-        const beforeConfig = params.getConfig();
-        const previousSecretsRevision = getActiveSecretsRuntimeSnapshotRevision();
-        const previousSecrets = getActiveSecretsRuntimeSnapshot();
-        assertAgentDatabaseConfiguration(beforeConfig, agentId, paths, env);
-        if (
-          !previousSecrets ||
-          !(await refreshActiveSecretsRuntimeSnapshotForConfig({
-            sourceConfig: previousSecrets.sourceConfig,
-            runtimeSourceConfig: getRuntimeConfigSourceSnapshot() ?? undefined,
-            includeAuthStoreRefs: true,
-            assertCurrent: () => {
-              signal.throwIfAborted();
-              assertCurrent();
-              if (
-                !params.isCurrent() ||
-                params.getConfig() !== beforeConfig ||
-                getActiveSecretsRuntimeSnapshotRevision() !== previousSecretsRevision
-              ) {
-                throw new Error(`Agent ${agentId} secrets preparation was superseded`);
-              }
-            },
-          }))
-        ) {
-          throw new Error(`Agent ${agentId} secrets preparation could not publish`);
-        }
+        // NakedClaw: an agent's credentials are the shared store's (nakedclaw
+        // skill, assumption 7), so its publication neither refreshes secrets nor
+        // waits on their revision, and a model runtime that a live credential write
+        // superseded is republished by the runtime itself. Only a config change
+        // supersedes the agent; build errors still throw from the refresh.
         const cfg = params.getConfig();
-        const secretsRevision = getActiveSecretsRuntimeSnapshotRevision();
-        const secrets = getActiveSecretsRuntimeSnapshot();
-        const authDatabasePath = resolveAuthProfileDatabasePath(resolveAgentDir(cfg, agentId, env));
-        if (
-          secretsRevision !== previousSecretsRevision + 1 ||
-          !secrets?.authStores.some((entry) =>
-            isSameOpenClawAgentDatabasePath(entry.databasePath, authDatabasePath),
-          )
-        ) {
-          throw new Error(`Agent ${agentId} secrets preparation has not published its auth store`);
-        }
-        let preparedInput: ReturnType<typeof listConfiguredOwnerInputs>[number] | undefined;
+        assertAgentDatabaseConfiguration(cfg, agentId, paths, env);
         const assertPreparationCurrent = () => {
           signal.throwIfAborted();
           assertCurrent();
-          if (
-            !params.isCurrent() ||
-            params.getConfig() !== cfg ||
-            getActiveSecretsRuntimeSnapshotRevision() !== secretsRevision
-          ) {
+          if (!params.isCurrent() || params.getConfig() !== cfg) {
             throw new Error(`Agent ${agentId} startup preparation was superseded`);
-          }
-          if (preparedInput && !getPreparedModelRuntimeSnapshot(preparedInput)) {
-            throw new Error(`Agent ${agentId} model preparation has not published`);
           }
         };
         const agentIds = new Set([agentId]);
@@ -229,10 +178,11 @@ export function activateGatewayAgentDatabaseStartup(params: {
               },
             }),
           );
-          preparedInput = listConfiguredOwnerInputs(cfg, undefined, true).find(
-            (input) => input.agentId === agentId,
-          );
-          if (!preparedInput) {
+          if (
+            !listConfiguredOwnerInputs(cfg, undefined, true).some(
+              (input) => input.agentId === agentId,
+            )
+          ) {
             throw new Error(`Agent ${agentId} model preparation is no longer configured`);
           }
           assertPreparationCurrent();

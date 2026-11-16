@@ -16,10 +16,7 @@ import {
   isRetryableSecretDegradationReason,
   listSecretResolutionErrorOwners,
 } from "../secrets/runtime-degraded-state.js";
-import {
-  collectCandidateAgentDirs,
-  prepareSecretsRuntimeFastPathSnapshot,
-} from "../secrets/runtime-fast-path.js";
+import { prepareSecretsRuntimeFastPathSnapshot } from "../secrets/runtime-fast-path.js";
 import {
   listProviderAuthDegradedOwners,
   preparedDegradationSupportsSourceOnlyRecovery,
@@ -406,8 +403,10 @@ export function createRuntimeSecretsActivator(params: {
           !params.activateRuntimeSecretsSnapshot
         ) {
           const startupEnv = activationParams.env ?? process.env;
+          // NakedClaw: only the shared store's legacy sources matter; agents have
+          // no stores of their own (nakedclaw skill, assumption 7).
           const fastPath = hasLegacyAuthProfileSourcesForStartup({
-            agentDirs: collectCandidateAgentDirs(sourceConfig, startupEnv),
+            agentDirs: [],
             env: startupEnv,
           })
             ? null

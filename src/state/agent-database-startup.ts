@@ -47,7 +47,7 @@ type PreparationInput = {
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
   assertCurrent: () => void;
-  phase: (name: "secrets" | "models") => void;
+  phase: (name: "models") => void;
 };
 type Activation = {
   isCurrent: () => boolean;
@@ -65,7 +65,6 @@ type PreparationPhase =
   | "migration-wait"
   | "migration"
   | "publication-wait"
-  | "secrets"
   | "models"
   | "publication";
 type PendingRecovery = {

@@ -84,6 +84,8 @@ afterEach(async () => {
 });
 
 describe("Doctor auth migration source ownership", () => {
+  // NakedClaw: removed the per-agent import and relocation cases; agents share one
+  // store and legacy migration is not supported beyond detection (assumptions 6, 7).
   it.each([
     "shared-wal",
     "shared-shm",
@@ -200,92 +202,4 @@ describe("Doctor auth migration source ownership", () => {
     expect(loadPersistedAuthProfileStore(selected.agentDir())).toBeNull();
     expect(loadPersistedAuthProfileStore(ambient.agentDir())).toBeNull();
   });
-
-  it.each(sourceNames)("imports and archives only the selected %s source", async (sourceName) => {
-    const { selected, ambient } = await createOwners();
-    const selectedKey = `fake-selected-${randomUUID()}`;
-    const selectedSource = writeSource(
-      selected.agentDir(),
-      sourceName,
-      sourceValue(sourceName, selectedKey, 20),
-    );
-    const ambientSource = writeSource(
-      ambient.agentDir(),
-      sourceName,
-      sourceValue(sourceName, `fake-ambient-${randomUUID()}`, 10),
-    );
-
-    const result = await maybeMigrateAuthProfileJsonStoresToSqlite({
-      cfg: {},
-      env: selected.env,
-      prompter: { confirmAutoFix: async () => true },
-    });
-
-    expect
-      .soft(loadPersistedAuthProfileStore(selected.agentDir()))
-      .toMatchObject(
-        sourceName === "auth-state.json"
-          ? { usageStats: { [profileId]: { lastUsed: 20 } } }
-          : { profiles: { [profileId]: { key: selectedKey } } },
-      );
-    expect.soft(result.detected).toEqual([selectedSource.sourcePath]);
-    expect.soft(result.warnings).toEqual([]);
-    expect.soft(fs.existsSync(ambientSource.sourcePath)).toBe(true);
-    if (fs.existsSync(ambientSource.sourcePath)) {
-      expect.soft(fs.readFileSync(ambientSource.sourcePath, "utf8")).toBe(ambientSource.bytes);
-    }
-    expect.soft(archivesFor(ambientSource.sourcePath)).toEqual([]);
-    expect.soft(loadPersistedAuthProfileStore(ambient.agentDir())).toBeNull();
-    expect.soft(fs.existsSync(selectedSource.sourcePath)).toBe(false);
-    const selectedArchives = archivesFor(selectedSource.sourcePath);
-    expect.soft(selectedArchives).toHaveLength(1);
-    const [selectedArchive] = selectedArchives;
-    if (selectedArchive) {
-      expect.soft(fs.readFileSync(selectedArchive, "utf8")).toBe(selectedSource.bytes);
-    }
-    const receipts = openOpenClawStateDatabase({ env: selected.env })
-      .db.prepare("SELECT source_path, status, removed_source FROM migration_sources")
-      .all();
-    expect
-      .soft(receipts)
-      .toEqual([
-        { source_path: selectedSource.sourcePath, status: "completed", removed_source: 1 },
-      ]);
-  });
-
-  it.each(["OPENCLAW_AGENT_DIR", "PI_CODING_AGENT_DIR"] as const)(
-    "resolves a tilde %s relocation against the selected home before importing",
-    async (agentDirVariable) => {
-      const { selected, ambient } = await createOwners({ [agentDirVariable]: "~/relocated-auth" });
-      const selectedDir = path.join(selected.home, "relocated-auth");
-      const ambientDir = path.join(ambient.home, "relocated-auth");
-      const selectedKey = `fake-selected-${randomUUID()}`;
-      const selectedSource = writeSource(
-        selectedDir,
-        "auth-profiles.json",
-        sourceValue("auth-profiles.json", selectedKey, 20),
-      );
-      const ambientSource = writeSource(
-        ambientDir,
-        "auth-profiles.json",
-        sourceValue("auth-profiles.json", `fake-ambient-${randomUUID()}`, 10),
-      );
-
-      const result = await maybeMigrateAuthProfileJsonStoresToSqlite({
-        cfg: {},
-        env: selected.env,
-        prompter: { confirmAutoFix: async () => true },
-      });
-
-      expect.soft(loadPersistedAuthProfileStore(selectedDir)?.profiles[profileId]).toMatchObject({
-        key: selectedKey,
-      });
-      expect.soft(result.detected).toEqual([selectedSource.sourcePath]);
-      expect.soft(result.warnings).toEqual([]);
-      expect.soft(fs.existsSync(selectedSource.sourcePath)).toBe(false);
-      expect.soft(fs.existsSync(ambientSource.sourcePath)).toBe(true);
-      expect.soft(archivesFor(ambientSource.sourcePath)).toEqual([]);
-      expect.soft(loadPersistedAuthProfileStore(ambientDir)).toBeNull();
-    },
-  );
 });

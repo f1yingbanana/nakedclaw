@@ -1,74 +1,18 @@
 import { copyCanonicalAuthProfileCredentialObservations } from "../agents/auth-profiles/credential-observation.js";
-import {
-  AuthProfileMigrationRequiredError,
-  markAuthProfileMigrationRequired,
-} from "../agents/auth-profiles/legacy-source-diagnostic.js";
-import {
-  resolveAuthProfileDatabaseOwnerId,
-  resolveAuthProfileDatabasePath,
-} from "../agents/auth-profiles/sqlite.js";
+import { resolveRuntimeAuthProfileAgentDir } from "../agents/auth-profiles/runtime-scope.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
-import { readAgentDatabaseAdmissionRefusal } from "../state/agent-database-admission.js";
-import { isSameOpenClawAgentDatabasePath } from "../state/openclaw-agent-db.paths.js";
-import { shortenHomePath } from "../utils.js";
-import type { DegradedSecretOwner } from "./runtime-degraded-state.js";
 
-export function loadAdmittedAuthStores(params: {
-  agentDirs: readonly string[];
-  env: NodeJS.ProcessEnv;
-  loadAuthStore: (agentDir?: string) => AuthProfileStore;
-  allowUnavailable: boolean;
-}): {
-  authStores: Array<{ agentDir: string; store: AuthProfileStore }>;
-  degradedOwners: DegradedSecretOwner[];
-} {
-  const authStores: Array<{ agentDir: string; store: AuthProfileStore }> = [];
-  const degradedOwners: DegradedSecretOwner[] = [];
-  for (const agentDir of params.agentDirs) {
-    const databasePath = resolveAuthProfileDatabasePath(agentDir);
-    const refusal = readAgentDatabaseAdmissionRefusal(resolveAuthProfileDatabaseOwnerId(agentDir), {
-      env: params.env,
-    });
-    if (
-      refusal?.paths.some((pathname) => isSameOpenClawAgentDatabasePath(pathname, databasePath))
-    ) {
-      // The admission owner keeps this store unavailable, including cached credentials.
-      // Pending preparation resolves its secrets before publishing successful admission.
-      if (refusal.code === "agent-database-inspection-pending") {
-        continue;
-      }
-      degradedOwners.push({
-        ownerKind: "route",
-        ownerId: shortenHomePath(databasePath),
-        state: "unavailable",
-        degradationState: "cold",
-        paths: [databasePath],
-        refKeys: [],
-        reason: `${refusal.reason}\n${refusal.repairHint}`,
-      });
-      continue;
-    }
-    try {
-      const source = params.loadAuthStore(agentDir);
-      const store = structuredClone(source);
-      copyCanonicalAuthProfileCredentialObservations(source.profiles, store.profiles);
-      authStores.push({ agentDir, store });
-    } catch (error) {
-      if (!(error instanceof AuthProfileMigrationRequiredError) || !params.allowUnavailable) {
-        throw error;
-      }
-      markAuthProfileMigrationRequired(agentDir, error);
-      authStores.push({ agentDir, store: { version: 1, profiles: {} } });
-      degradedOwners.push({
-        ownerKind: "route",
-        ownerId: error.ownerId,
-        state: "unavailable",
-        degradationState: "cold",
-        paths: error.sourceKinds.map((kind) => `auth-profile-legacy:${kind}`),
-        refKeys: [],
-        reason: "auth profile migration required",
-      });
-    }
-  }
-  return { authStores, degradedOwners };
+/**
+ * NakedClaw: the secrets snapshot holds the one shared credential store, not a
+ * merged copy per agent (nakedclaw skill, assumption 7). An empty `agentDir`
+ * names the shared store everywhere the snapshot is read; a scoped CLI run's
+ * entry names its own directory. Every recovered agent used to refresh all 145.
+ */
+export function loadAdmittedAuthStores(
+  loadAuthStore: (agentDir?: string) => AuthProfileStore,
+): Array<{ agentDir: string; store: AuthProfileStore }> {
+  const source = loadAuthStore(undefined);
+  const store = structuredClone(source);
+  copyCanonicalAuthProfileCredentialObservations(source.profiles, store.profiles);
+  return [{ agentDir: resolveRuntimeAuthProfileAgentDir() ?? "", store }];
 }

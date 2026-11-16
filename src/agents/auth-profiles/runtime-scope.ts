@@ -13,6 +13,22 @@ type AuthProfileRuntimeMode =
 
 export const authProfileRuntimeMode = new AsyncLocalStorage<AuthProfileRuntimeMode>();
 
+// NakedClaw: every agent uses the one shared credential store; none reads or
+// writes its own (nakedclaw skill, assumption 7). Kazusa saves provider keys
+// only to the shared store, so per-agent stores were 145 empty reads at every
+// start and recovery, and per-agent usage writes. A scoped CLI run (`--local`,
+// onboarding staging) still names its own directory.
+export function resolveRuntimeAuthProfileAgentDir(_agentDir?: string): string | undefined {
+  const mode = authProfileRuntimeMode.getStore();
+  return mode?.kind === "agent-dir" ? mode.agentDir : undefined;
+}
+
+/** Whether a scoped CLI run (`agent --local`, onboarding staging) owns this agent directory. */
+export function isScopedAuthProfileAgentDir(agentDir: string): boolean {
+  const scoped = resolveRuntimeAuthProfileAgentDir();
+  return scoped !== undefined && path.resolve(scoped) === path.resolve(agentDir);
+}
+
 type WorkerAuthProfileWrites = {
   env: NodeJS.ProcessEnv;
   assertOwner: (env: NodeJS.ProcessEnv) => void;

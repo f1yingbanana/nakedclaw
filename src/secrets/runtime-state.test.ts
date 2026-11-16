@@ -20,7 +20,7 @@ import {
   setRuntimeAuthProfileStoreSnapshot,
 } from "../agents/auth-profiles/runtime-snapshots.js";
 import { testing as runtimeSnapshotsTesting } from "../agents/auth-profiles/runtime-snapshots.test-support.js";
-import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
+import { resolveAuthProfileStorePath } from "../agents/auth-profiles/sqlite.js";
 import {
   ensureAuthProfileStoreWithoutExternalProfiles,
   saveAuthProfileStore,
@@ -80,7 +80,14 @@ function preparedSnapshot(
       diagnostics: [],
     },
     ...overrides,
-    authStores: prepareRuntimeAuthProfileStoreSnapshots(overrides.authStores ?? []),
+    // NakedClaw: an agent's auth store is the shared one (assumption 7).
+    authStores: prepareRuntimeAuthProfileStoreSnapshots(
+      (overrides.authStores ?? []).map(({ agentDir, store }) => ({
+        agentDir,
+        databasePath: resolveAuthProfileStorePath(agentDir),
+        store,
+      })),
+    ),
   };
 }
 
@@ -205,7 +212,7 @@ describe("secrets runtime state", () => {
 
   it("preserves exact canonical credential observations through rollback without claiming runtime secrets", async () => {
     const agentDir = "/tmp/openclaw-auth-observation-clones";
-    const databasePath = resolveAuthProfileDatabasePath(agentDir);
+    const databasePath = resolveAuthProfileStorePath(agentDir);
     const canonical: AuthProfileStore = {
       version: 1,
       profiles: {
@@ -623,18 +630,17 @@ describe("secrets runtime state", () => {
     },
   );
 
-  it.each([
-    ["local override", ["openai:default"], "sk-old"],
-    ["inherited profile", [], "sk-candidate"],
-  ])("uses the effective owner token for %s", (_label, runtimeLocalProfileIds, expected) => {
-    const agentDir = `/tmp/openclaw-auth-effective-owner-${runtimeLocalProfileIds.length}`;
+  // NakedClaw: removed the local override case; a shared mutation owns every agent's
+  // profile (assumption 7).
+  it("uses the effective owner token for an inherited profile", () => {
+    const agentDir = "/tmp/openclaw-auth-effective-owner";
     const snapshot = (key: string, port: number) =>
       preparedGatewayAuthSnapshot(agentDir, port, {
         version: 1,
         profiles: {
           "openai:default": { type: "api_key", provider: "openai", key },
         },
-        runtimeLocalProfileIds,
+        runtimeLocalProfileIds: [],
       });
     activateSnapshot(snapshot("sk-old", 19_001));
     const previous = getActiveSecretsRuntimeSnapshotState()!;
@@ -651,7 +657,7 @@ describe("secrets runtime state", () => {
     expect(
       getRuntimeAuthProfileStoreSnapshotCore(agentDir)?.profiles["openai:default"],
     ).toMatchObject({
-      key: expected,
+      key: "sk-candidate",
     });
   });
 
@@ -1005,9 +1011,10 @@ describe("secrets runtime state", () => {
     },
   );
 
+  // NakedClaw: removed the unrelated main write over an agent-local profile; agents
+  // have no stores of their own (assumption 7).
   it.each([
     ["state-only bookkeeping write", "custom", "", true, false, false, true],
-    ["unrelated main bookkeeping write", "main", "", true, false, false, false],
     ["inherited main bookkeeping write", "main", "", true, true, true, true],
     ["related main-store write", "main", "openai:default", false, true, false, true],
   ] as const)(

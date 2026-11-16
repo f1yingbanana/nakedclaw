@@ -14,6 +14,7 @@ import {
   createAuthProfileStoreFixture as authStore,
 } from "./auth-profiles/credential-fixtures.test-support.js";
 import { clearAuthProfileMigrationDiagnostics } from "./auth-profiles/legacy-source-diagnostic.js";
+import { resolveSharedAuthStorePath } from "./auth-profiles/path-resolve.js";
 import {
   clearRuntimeAuthProfileStoreSnapshots,
   replaceRuntimeAuthProfileStoreSnapshots,
@@ -262,26 +263,20 @@ async function resolveDemoLocalApiKey(params: {
 }
 
 describe("shared auth profile read-through", () => {
+  // NakedClaw: removed the agent-local override case; agents have no stores of
+  // their own (assumption 7).
   it.each([
     {
       name: "reads a shared API key without a local profile",
       baseKey: "shared-state-key",
       legacy: false,
-      localKey: undefined,
     },
     {
       name: "keeps the populated legacy main store authoritative before relocation",
       baseKey: "legacy-main-key",
       legacy: true,
-      localKey: undefined,
     },
-    {
-      name: "lets an agent-local profile override its shared read-through base",
-      baseKey: "shared-state-key",
-      legacy: false,
-      localKey: "agent-local-key",
-    },
-  ])("$name", async ({ baseKey, legacy, localKey }) => {
+  ])("$name", async ({ baseKey, legacy }) => {
     await withOpenClawTestState(
       {
         layout: "state-only",
@@ -303,19 +298,15 @@ describe("shared auth profile read-through", () => {
           credential,
           agentDir: mainAgentDir,
         });
-        if (localKey) {
-          writePersistedAuthProfileStoreRaw(
-            authStore({ [profileId]: { ...credential, key: localKey } }),
-            agentDir,
-          );
-        }
 
-        expect(inspectPersistedAuthProfileStoreRaw(mainAgentDir).status).toBe(
-          legacy ? "readable" : "missing",
+        // NakedClaw: every agent reads the one shared store (assumption 7); it stays
+        // in the legacy main database only while that one is populated.
+        expect(resolveSharedAuthStorePath(state.env)).toBe(
+          legacy
+            ? path.join(mainAgentDir, "openclaw-agent.sqlite")
+            : resolveOpenClawStateSqlitePath(state.env),
         );
-        expect(inspectPersistedAuthProfileStoreRaw(agentDir).status).toBe(
-          localKey ? "readable" : "missing",
-        );
+        expect(inspectPersistedAuthProfileStoreRaw(agentDir).status).toBe("readable");
 
         const inheritedAuthDir = resolveLegacyInheritedAuthDir({}, state.env);
         const store = ensureAuthProfileStore(agentDir, {
@@ -330,7 +321,7 @@ describe("shared auth profile read-through", () => {
           store,
         });
 
-        expect(resolved.apiKey).toBe(localKey ?? baseKey);
+        expect(resolved.apiKey).toBe(baseKey);
         expect(resolved.source).toBe(`profile:${profileId}`);
       },
     );
@@ -678,7 +669,9 @@ describe("resolveApiKeyForProviderCore — per-entry apiKey as profile ID refere
       await withOpenClawTestState(
         { layout: "state-only", prefix: "openclaw-provider-migration-" },
         async (state) => {
-          const agentDir = state.agentDir("worker");
+          // NakedClaw: only the shared owner's legacy file needs migration; other
+          // agents' files are ignored (assumption 7).
+          const agentDir = state.agentDir();
           await fs.mkdir(agentDir, { recursive: true });
           const legacyPath = path.join(agentDir, "auth-profiles.json");
           const legacyBytes = JSON.stringify(
@@ -758,7 +751,8 @@ describe("resolveApiKeyForProviderCore — per-entry apiKey as profile ID refere
     await withOpenClawTestState(
       { layout: "state-only", prefix: "openclaw-entry-migration-" },
       async (state) => {
-        const agentDir = state.agentDir("worker");
+        // NakedClaw: the shared owner's legacy file (assumption 7).
+        const agentDir = state.agentDir();
         await fs.mkdir(agentDir, { recursive: true });
         await fs.writeFile(path.join(agentDir, "auth-profiles.json"), "{}\n");
         await expect(

@@ -66,9 +66,14 @@ describe("SQLite auth storage", () => {
     }
   });
 
+  // NakedClaw: AuthStorage.forAgent reads and writes the shared store (assumption 7),
+  // so each test's store is the main agent database of its own legacy-main root.
   function makeAgentDir(): string {
-    const agentDir = fs.mkdtempSync(path.join(tmpdir(), "auth-sqlite-"));
-    tempDirs.push(agentDir);
+    const stateDir = fs.mkdtempSync(path.join(tmpdir(), "auth-sqlite-"));
+    tempDirs.push(stateDir);
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+    const agentDir = path.join(stateDir, "agents", "main", "agent");
+    fs.mkdirSync(agentDir, { recursive: true });
     return agentDir;
   }
 

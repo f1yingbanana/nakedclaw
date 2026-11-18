@@ -93,13 +93,14 @@ export function inspectAgentDatabaseSchema(
         )
       ) {
         inspection.integrityGateOutcome = "cached";
-      } else if (input.deferRuntimeIntegrity && !migrationPending) {
-        // The pending Gateway owner claims the live lease and validates before writes.
-        inspection.preparationPending = true;
-      } else {
+      } else if (migrationPending || !input.deferRuntimeIntegrity) {
         assertSqliteIntegrity(database, input.pathname);
         inspection.integrityGateOutcome = "healthy";
       }
+      // NakedClaw: a Gateway database with no clean-close record (an unclean stop, a copied
+      // world, a new version) is admitted like any other (nakedclaw skill, assumption 4). It
+      // used to wait for a background recovery turn first. Its first open still runs the
+      // integrity gate: a full check there, or a deferred one that requests it.
       assertCanonicalAgentPersistenceVersion(database, input.pathname, version);
     }
     const agentId =

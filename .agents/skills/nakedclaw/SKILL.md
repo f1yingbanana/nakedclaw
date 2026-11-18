@@ -83,6 +83,7 @@ Several would then be data-loss bugs.
 | Agent DB paths    | `isConfiguredAgentDatabaseTarget` checks exact configured claims across all targets before probing any file for an alias; checking every agent against the list used to stat and realpath each earlier target first. Same answers.                                                                                                                                                                                                                                                                                                                                                                                                                                   | —          |
 | Session startup   | No legacy file-store, ACP, main-key or run-outcome checks per agent, and no eager canonical validation pass; the canonical-validation worker pool that only startup used is deleted, and `certifySessionCanonicalValidationPending` takes only the pending work a runtime read or change captured. A database without a receipt (a copied or restored world, or one that was empty when last certified) is validated at its first session read or change instead: on the main thread, or by a worker that records the receipt on the Gateway's session-row and request paths.                                                                                        | 1, 6       |
 | Recovery          | Publishing a recovered agent no longer refreshes secrets, compares the secrets revision, or requires its model runtime to still be published when admission completes; only a config change supersedes it. A model runtime superseded by a live credential write is republished by the runtime itself; build errors still refuse the agent.                                                                                                                                                                                                                                                                                                                          | 7          |
+| Unclean start     | A database with no clean-close record (an unclean stop, a copied world, a new version) is admitted at startup like any other; it used to wait for a serial background recovery turn (open, session maintenance, model runtime republication) while its agent refused work. Startup also no longer awaits a chat-metadata refresh after publishing the model runtime: the chat-metadata lifecycle refreshes on every publication, and the awaited one stopped the Gateway when it ran during a recovering agent's republication.                                                                                                                                      | 4          |
 | Plugin index      | A native-admission overlay of the installed index reuses the index's fingerprint (the fingerprint already leaves admissions out).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | —          |
 | Plugin workspace  | In a world with a default workspace, every agent's plugin metadata and registry load for the Gateway's plugin workspace, so agents borrow the Gateway's registry. Applies to `agent` CLI runs in another cwd too.                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 6          |
 | Credentials       | One rule, in every world: an agent directory names the shared store unless a scoped `agent --local` or onboarding run owns it (`resolveRuntimeAuthProfileAgentDir`, `isScopedAuthProfileAgentDir`). `resolveAuthProfileStorePath` applies it where a store is opened and where runtime snapshot keys and secret owner ids are made; other agent databases' auth rows are not read (`sqlite-read.ts`). The secrets snapshot holds one shared entry, recovery no longer refreshes secrets per agent, `secrets apply` targets the shared store once, migration and source checks and display paths name the shared store, and inline API-key failures are not recorded. | 7          |
@@ -103,6 +104,12 @@ What these cost us, and how loss is detected now:
   (measured 4.7 s, inside the 10 s native-close reserve). A forced exit leaves
   `-wal` files that SQLite replays on next open; anything snapshotting a world
   must checkpoint first or include them. Same recovery as upstream.
+- **Unclean starts**: no integrity check is dropped. The first open still runs
+  the gate in a worker: WAL databases defer to the background full check, and a
+  database whose dead owner cannot be proven (a hard kill) is checked in full at
+  open. A corrupt non-WAL database now fails at its first open instead of being
+  refused at startup with a repair hint. The recovery queue remains for databases
+  whose startup inspection takes over 5 s and for startup index repair.
 - **Queue refusals** are gone for the 128-request case only; the 256 MB queued
   byte budget and oversized inputs still refuse at once.
 - **Auth counters**: an expired cooldown cleared in memory can leave stale
@@ -229,6 +236,11 @@ stops uncleanly), Kazusa's two config settings applied
 A clean boot listens at about 14 s. Recovery is now limited by opening the
 character databases (`open-wait`), not by preparing them.
 
+With unclean starts admitted directly (2026-11-18), the same snapshot is ready
+(`sidecars.ready`) about 20 s after start with no character refused, like a
+clean boot; before, the last character recovered at about 110 s. A hard-killed
+Gateway restarts the same way.
+
 ## Rules for working in this fork
 
 - **Every cut names its assumption** in a `NakedClaw:` code comment and in its
@@ -292,6 +304,8 @@ Base `v2026.10.5` (1b58cb9a1b4).
 12. `perf(naked): load every agent's plugins for the Gateway workspace`
 13. `perf(naked): use one shared credential store for every agent`
 14. `docs(naked): record startup and recovery cuts`
+15. `fix(naked): stop awaiting a chat-metadata refresh at startup`
+16. `perf(naked): admit databases without a clean-close record at startup`
 
 Tests run for 9–13: `src/secrets/*` (runtime, fast path, apply, admission,
 inline refs, state), `src/agents/auth-profiles/*`, `src/agents/sessions/auth-storage*`,

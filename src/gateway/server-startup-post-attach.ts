@@ -123,7 +123,6 @@ export async function startGatewaySidecars(params: {
   startChannels: () => Promise<void>;
   getCronService?: () => PluginServiceCronHost | null | undefined;
   shouldStartChannels?: () => boolean;
-  refreshChatMetadata?: () => Promise<void>;
   onChannelsStarted?: () => Awaitable<void>;
   onPluginServices?: (pluginServices: PluginServicesHandle | null) => void;
   onPostReadySidecars: (...sidecars: GatewayPostReadySidecarHandle[]) => void;
@@ -235,9 +234,9 @@ export async function startGatewaySidecars(params: {
     const { prewarmConfigDrivenReplyRuntime } = await loadGetReplyFromConfigRuntime();
     await prewarmConfigDrivenReplyRuntime();
   });
-  await measureStartup(params.startupTrace, "sidecars.chat-metadata", async () => {
-    await params.refreshChatMetadata?.();
-  });
+  // NakedClaw: no chat-metadata refresh here. The chat-metadata lifecycle refreshes on every
+  // model runtime publication and catches up when it attaches; waiting on a second refresh here
+  // stopped the Gateway whenever it ran while an agent's model runtime was being replaced.
   const shouldStartChannels = params.shouldStartChannels?.() !== false;
   await measureStartup(params.startupTrace, "sidecars.channels", async () => {
     const channelStart = skipChannels
@@ -583,7 +582,6 @@ export async function startGatewayPostAttachRuntime(
     defaultWorkspaceDir: string;
     deps: CliDeps;
     startChannels: () => Promise<void>;
-    refreshChatMetadata?: () => Promise<void>;
     recoveryRuntime: GatewayRecoveryRuntime;
     isRestartRecoverySuppressed: () => boolean;
     resolveGatewayContext: GatewayContextResolver;
@@ -861,7 +859,6 @@ export async function startGatewayPostAttachRuntime(
                   getCronService: params.getCronService,
                   startChannels: params.startChannels,
                   shouldStartChannels: () => params.isClosing?.() !== true,
-                  refreshChatMetadata: params.refreshChatMetadata,
                   log: params.log,
                   logHooks: params.logHooks,
                   logChannels: params.logChannels,

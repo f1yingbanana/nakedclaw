@@ -2,8 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Worker } from "node:worker_threads";
-import { afterEach, expect, it, onTestFinished, vi } from "vitest";
-import { openFixtureReceiptChannel } from "../../test/helpers/fixture-receipts.js";
+import { afterEach, expect, it, vi } from "vitest";
 import { withinTest } from "../../test/helpers/promise.js";
 import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { saveAuthProfileStore } from "../agents/auth-profiles.js";
@@ -31,11 +30,9 @@ import {
   activateSecretsRuntimeSnapshotWithSource,
   getActiveSecretsRuntimeSnapshot,
 } from "../secrets/runtime.js";
-import { sessionChanges } from "../sessions/session-row-changes.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
   AgentDatabaseAdmissionError,
-  listAgentDatabaseAdmissionRefusals,
   readAgentDatabaseAdmissionRefusal,
 } from "../state/agent-database-admission.js";
 import { withAgentDatabaseStartupAdmission } from "../state/agent-database-startup.js";
@@ -86,7 +83,6 @@ function pauseIntegrityInspections(params: {
   pausePaths?: string[];
   pausePreparation?: boolean;
   pauseSchema?: boolean;
-  preparationReceiptBroadcastName?: string;
 }) {
   const releasePath = path.join(params.root, "release-inspection");
   const enteredPaths = params.paths.map((_, index) =>
@@ -103,10 +99,7 @@ function pauseIntegrityInspections(params: {
     `
 const fs = require('node:fs'), path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { BroadcastChannel, isMainThread, threadId } = require('node:worker_threads');
-const receiptBroadcastName = ${JSON.stringify(params.preparationReceiptBroadcastName)};
-const receipts = !isMainThread && receiptBroadcastName ? new BroadcastChannel(receiptBroadcastName) : undefined;
-receipts?.unref();
+const { isMainThread, threadId } = require('node:worker_threads');
 const paths = ${JSON.stringify(params.paths.map((pathname) => fs.realpathSync.native(pathname)))};
 const paused = ${JSON.stringify(params.paths.map((pathname) => pausedPaths.includes(pathname)))};
 const preparation = ${params.pausePreparation === true} && (!isMainThread || process.argv[1]?.includes('sqlite-integrity.worker'));
@@ -129,7 +122,6 @@ DatabaseSync.prototype.prepare = function(sql) {
     if (!isMainThread) fs.writeFileSync(marker + '.thread', String(threadId));
     fs.writeFileSync(pendingMarker, String(process.pid));
     fs.renameSync(pendingMarker, marker);
-    receipts?.postMessage({ source: marker, line: 'entered' });
     const pause = new Int32Array(new SharedArrayBuffer(4));
     const deadline = Date.now() + 60000;
     while (paused[index] && !fs.existsSync(release) && !fs.existsSync(releases[index])) {
@@ -165,7 +157,8 @@ it.for([
   { outcome: "corrupt", agentId: "main" },
   { outcome: "startup-failure", agentId: "worker" },
   { outcome: "shutdown-preparation", agentId: "worker" },
-  { outcome: "handoff", agentId: "main" },
+  // NakedClaw: no "handoff" outcome. A database without a clean-close record no longer waits
+  // in startup preparation for its writable owner (nakedclaw skill, assumption 4).
 ] as const)(
   "applies startup admission while $agentId follows its $outcome lifecycle",
   async ({ outcome, agentId }, { signal }) => {
@@ -270,18 +263,13 @@ it.for([
       await closeStateDatabaseForTest();
     }
     const agentBytes = fs.readFileSync(agentPath);
-    const handoffReceipts = outcome === "handoff" ? await openFixtureReceiptChannel() : undefined;
-    if (handoffReceipts) {
-      onTestFinished(() => handoffReceipts.close());
-    }
     const paused = outcome !== "corrupt" && outcome !== "physical-corrupt" && outcome !== "fast";
     const pause = paused
       ? pauseIntegrityInspections({
           root,
           paths: [agentPath],
-          pausePreparation: outcome === "shutdown-preparation" || outcome === "handoff",
-          pauseSchema: outcome !== "handoff",
-          preparationReceiptBroadcastName: handoffReceipts?.broadcastName,
+          pausePreparation: outcome === "shutdown-preparation",
+          pauseSchema: true,
         })
       : undefined;
     const releasePath = pause?.releasePath ?? path.join(root, "release-inspection");
@@ -439,14 +427,12 @@ it.for([
       }
       expect((await probeGateway(port, "/healthz")).status).toBe(200);
       if (outcome === "corrupt") {
-        // Gateway startup can settle before background integrity inspection does.
+        // NakedClaw: a database without a clean-close record is admitted at startup
+        // (assumption 4). Its first open runs the integrity gate and fails there.
         await withinTest(inspectionSettled ?? Promise.resolve(), signal);
-        expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toMatchObject({
-          code: "agent-database-inspection-failed",
-          repairHint: expect.stringContaining("doctor --fix"),
-        });
-        expect(() => openOpenClawAgentDatabase(scope)).toThrow(AgentDatabaseAdmissionError);
-        expect((await probeGateway(port, "/readyz")).status).toBe(agentId === "main" ? 503 : 200);
+        expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toBeUndefined();
+        expect(() => openOpenClawAgentDatabase(scope)).toThrow(/foreign_key_check failed/);
+        expect((await probeGateway(port, "/readyz")).status).toBe(200);
         return;
       }
       const readiness = await probeGateway(port, "/readyz");
@@ -464,15 +450,7 @@ it.for([
           code: "agent-database-inspection-pending",
         });
         expect(() => openOpenClawAgentDatabase(scope)).toThrow(AgentDatabaseAdmissionError);
-        if (outcome === "handoff") {
-          // Old startup blocks in full-file preflight before claiming its writable lease.
-          expect(fs.existsSync(enteredPath)).toBe(false);
-          const preparationMarker = pause!.preparationEnteredPaths[0]!;
-          await withinTest(handoffReceipts!.waitFor(preparationMarker, "entered"), signal);
-          expect(fs.existsSync(preparationMarker)).toBe(true);
-        } else {
-          await vi.waitFor(() => expect(fs.existsSync(enteredPath)).toBe(true));
-        }
+        await vi.waitFor(() => expect(fs.existsSync(enteredPath)).toBe(true));
       }
       if (outcome === "recover") {
         // Full post-attach model preparation can republish auth-store containers;
@@ -509,14 +487,7 @@ it.for([
           }
         });
       }
-      if (outcome === "handoff") {
-        expect(fs.existsSync(releasePath)).toBe(false);
-        fs.writeFileSync(pause!.preparationReleasePath, "resume");
-        await vi.waitFor(
-          () => expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toBeUndefined(),
-          { timeout: 10000 },
-        );
-      } else if (outcome === "shutdown-preparation") {
+      if (outcome === "shutdown-preparation") {
         fs.writeFileSync(releasePath, "resume");
         const preparationEnteredPath = pause!.preparationEnteredPaths[0]!;
         await vi.waitFor(() => expect(fs.existsSync(preparationEnteredPath)).toBe(true), {
@@ -663,9 +634,9 @@ it.for([
   },
 );
 
-it("admits a deferred fleet without gating readiness on stale configured or unconfigured stores", async ({
-  signal,
-}) => {
+// NakedClaw: receipts from another version used to send the whole fleet through deferred
+// preparation. They are admitted at startup now (nakedclaw skill, assumption 4).
+it("admits a fleet with stale receipts at startup, skipping unconfigured stores", async () => {
   testState.agentsConfig = {
     ownership: "explicit",
     entries: { "worker-a": {}, "worker-b": {}, main: {}, absent: {} },
@@ -717,54 +688,9 @@ it("admits a deferred fleet without gating readiness on stale configured or unco
     const logger = createLogger(name);
     return name === "state/agent-admission" ? { ...logger, warn: warnings } : logger;
   });
-  const openings: string[] = [];
-  let activeOpenings = 0;
-  let peakOpenings = 0;
-  const openingEntered = agentIds.map(() => createDeferredCore());
-  const openingReleases = new Map(agentIds.map((id) => [id, createDeferredCore()]));
-  const admitted = new Set<string>();
-  const allAdmitted = createDeferredCore();
-  const unsubscribe = sessionChanges.subscribe((change) => {
-    if ("all" in change && typeof change.scope === "object" && change.scope.topology) {
-      const id = change.scope.agentId;
-      if (
-        id &&
-        agentIds.includes(id) &&
-        !listAgentDatabaseAdmissionRefusals({ env }).some((refusal) => refusal.agentId === id)
-      ) {
-        admitted.add(id);
-        if (admitted.size === agentIds.length) {
-          allAdmitted.resolve();
-        }
-      }
-    }
-  });
   let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
   try {
-    const started = await withAgentDatabaseStartupAdmission(async (admission) => {
-      const scheduling = admission.scheduling.bind(admission);
-      vi.spyOn(admission, "scheduling").mockImplementation((...args) => ({
-        ...scheduling(...args),
-        canDefer: () => true,
-      }));
-      const activate = admission.activate.bind(admission);
-      vi.spyOn(admission, "activate").mockImplementation((activation) =>
-        activate({
-          ...activation,
-          openAgent: async (input) => {
-            activeOpenings += 1;
-            peakOpenings = Math.max(peakOpenings, activeOpenings);
-            openings.push(input.agentId);
-            openingEntered[openings.length - 1]!.resolve();
-            try {
-              await withinTest(openingReleases.get(input.agentId)!.promise, signal);
-              await activation.openAgent(input);
-            } finally {
-              activeOpenings -= 1;
-            }
-          },
-        }),
-      );
+    const started = await withAgentDatabaseStartupAdmission(async () => {
       await assertOpenClawDatabasesReady({ env, operation: "gateway-startup", config: cfg });
       const portClaim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
       return {
@@ -780,10 +706,10 @@ it("admits a deferred fleet without gating readiness on stale configured or unco
     expect((await probeGateway(started.port, "/healthz")).status).toBe(200);
     expect((await probeGateway(started.port, "/readyz")).status).toBe(200);
     for (const agentId of agentIds) {
-      expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toMatchObject({
-        code: "agent-database-inspection-pending",
-        paths: [paths[agentIds.indexOf(agentId)]],
-      });
+      expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toBeUndefined();
+      expect(openOpenClawAgentDatabase({ agentId, env }).path).toBe(
+        paths[agentIds.indexOf(agentId)],
+      );
     }
     expect(readAgentDatabaseAdmissionRefusal("absent", { env })).toBeUndefined();
     const absentOptions = { agentId: "absent", env };
@@ -791,17 +717,6 @@ it("admits a deferred fleet without gating readiness on stale configured or unco
     expect(openOpenClawAgentDatabase(absentOptions).agentId).toBe("absent");
     expect(readAgentDatabaseAdmissionRefusal("openclaw", { env })).toBeUndefined();
     expect(fs.readFileSync(leftover)).toEqual(leftoverBytes);
-    await withinTest(openingEntered[1]!.promise, signal);
-    expect(openings).toHaveLength(2);
-    expect((await probeGateway(started.port, "/readyz")).status).toBe(200);
-    openingReleases.get(openings[0]!)!.resolve();
-    await withinTest(openingEntered[2]!.promise, signal);
-    expect(openings).toHaveLength(3);
-    for (const release of openingReleases.values()) {
-      release.resolve();
-    }
-    await withinTest(allAdmitted.promise, signal);
-    expect(peakOpenings).toBe(2);
     expect(warnings).toHaveBeenCalledWith(
       "Skipped openclaw-agent.sqlite: database is not a configured target; run openclaw doctor to inspect retained data.",
     );
@@ -811,17 +726,10 @@ it("admits a deferred fleet without gating readiness on stale configured or unco
         `Skipped ${path.basename(pathname)}: database is not a configured target; run openclaw doctor to inspect retained data.`,
       );
     }
-    for (const agentId of agentIds) {
-      expect(readAgentDatabaseAdmissionRefusal(agentId, { env })).toBeUndefined();
-    }
     expect(readAgentDatabaseAdmissionRefusal("openclaw", { env })).toBeUndefined();
     expect(fs.readFileSync(leftover)).toEqual(leftoverBytes);
     expect((await probeGateway(started.port, "/readyz")).status).toBe(200);
   } finally {
-    unsubscribe();
-    for (const release of openingReleases.values()) {
-      release.resolve();
-    }
     await server?.close();
   }
 });

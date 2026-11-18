@@ -136,7 +136,6 @@ export async function finishGatewayStartup(params: {
     registerGatewayLifetimeSidecars,
     registerConnectionDependentSidecars,
     unregisterConnectionDependentSidecar,
-    chatMetadataLifecycle,
     gatewayRequestContext,
     gatewayInstanceRuntime,
     getPluginMetadataSnapshot,
@@ -294,7 +293,6 @@ export async function finishGatewayStartup(params: {
           logHooks,
           logChannels,
           unlockStartupMethods: kernel.unlockStartupMethods,
-          refreshChatMetadata: chatMetadataLifecycle.refresh,
           loadStartupPlugins: async () => {
             const { loadGatewayStartupPluginRuntime } = await import("./server-startup-plugins.js");
             return loadGatewayStartupPluginRuntime({

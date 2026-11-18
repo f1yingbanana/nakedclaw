@@ -51,7 +51,6 @@ const STARTUP_PROGRESS_PHASES = new Set([
   "sidecars.main-session-recovery",
   "sidecars.model-runtime",
   "sidecars.reply-runtime",
-  "sidecars.chat-metadata",
   "sidecars.channels",
   "sidecars.plugin-services",
   "sidecars.subagent-recovery",

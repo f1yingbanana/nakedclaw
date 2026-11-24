@@ -276,10 +276,14 @@ Gateway restarts the same way.
   wait-recovered, summary, stop) boots a copy of the unclean 145-character
   snapshot; per-agent recovery phases are in the JSON log
   (`/tmp/openclaw/openclaw-<date>.log`, "recovered after background" records).
-- Shipping: `pnpm build`, then
-  `node scripts/package-openclaw-for-docker.mjs --allow-unreleased-changelog --skip-build --output-dir <dir> --output-name <name>.tgz`
-  (plain `pnpm pack` is refused), published as a GitHub release asset that
-  Kazusa depends on by URL. Never a git dependency: `dist/` is not in git.
+- Shipping: `node scripts/naked-pack.mjs --name <version>-naked-<n>` (builds,
+  then packs as upstream's npm release does: `@openclaw/ai` stays a dependency
+  on npm's package of the same version, not a bundled copy), published as a
+  GitHub release asset that Kazusa depends on by URL. It refuses while
+  `packages/ai` differs from the upstream tag: npm's package would then not be
+  this code. Never a git dependency: `dist/` is not in git. Releases up to
+  0.2.1 bundled `@openclaw/ai` (Docker's packaging), which left installs that
+  had it at the top level without either copy after an `npm install`.
 
 ## Upstream
 
